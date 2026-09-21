@@ -15,7 +15,7 @@ import re
 import shutil
 import subprocess
 import tempfile
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 JAR = Path(__file__).with_name("rars1_6.jar")
@@ -122,7 +122,12 @@ MESSAGE = re.compile(
 
 
 def parse_messages(stdout: str) -> list[Message]:
+    """Messages in RARS output. A message text may span several lines, e.g.
+    "<source line>\nInvalid language element: <token>"; it ends at an empty line
+    or at the next message.
+    """
     messages = []
+    continues = False
     for line in stdout.splitlines():
         match = MESSAGE.match(line)
         if match:
@@ -134,4 +139,9 @@ def parse_messages(stdout: str) -> list[Message]:
                 column=int(column) if column else None,
                 text=text,
             ))
+            continues = True
+        elif line and continues:
+            messages[-1] = replace(messages[-1], text=messages[-1].text + "\n" + line)
+        else:
+            continues = False
     return messages
