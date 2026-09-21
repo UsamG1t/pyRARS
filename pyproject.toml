@@ -1,0 +1,16 @@
+[project]
+name = "pyrars"
+version = "0.0.0"
+description = "RARS-compatible RISC-V assembler and simulator with a GTK user interface"
+requires-python = ">=3.14"
+dependencies = []
+
+[dependency-groups]
+dev = ["pytest"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]
+markers = [
+    "devel: differential test against RARS (needs `java` and tests/devel/rars1_6.jar)",
+]

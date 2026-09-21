@@ -1,3 +1,5 @@
 .claude/
 *~
 
+/tests/devel/*.jar
+__pycache__/
