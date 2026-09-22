@@ -131,13 +131,18 @@ def test_eqv_substitutes_following_lines(tmp_path):
     assert lines[2].text == "addi R, R, N  # c"
     assert lines[2].expanded == "addi t1, t1, -4  # c"
     assert [(t.kind, t.text) for t in lines[2].tokens] == [
-        (Kind.OPERATOR, "addi"), (Kind.REGISTER_NAME, "t1"), (Kind.REGISTER_NAME, "t1"),
-        (Kind.INTEGER, "-4"), (Kind.COMMENT, "# c")]
+        (Kind.OPERATOR, "addi"), (Kind.REGISTER_NAME, "t1"), (Kind.COMMA, ","), (Kind.REGISTER_NAME, "t1"),
+        (Kind.COMMA, ","), (Kind.EXPR_OP, "-"), (Kind.INTEGER, "4"), (Kind.COMMENT, "# c")]
 
 
 def test_eqv_text_is_tokenized_after_substitution(tmp_path):
-    lines, errors = eqv(tmp_path, ".eqv N, 4\nli t0, -N\n")
-    assert [(t.kind, t.value) for t in lines[1].tokens][-1] == (Kind.INTEGER, -4)
+    lines, errors = eqv(tmp_path, ".eqv N, 0x10\nli t0, -N\n")
+    assert [(t.kind, t.value) for t in lines[1].tokens][-2:] == [(Kind.EXPR_OP, None), (Kind.INTEGER, 16)]
+
+
+def test_eqv_text_may_contain_commas(tmp_path):
+    lines, errors = eqv(tmp_path, ".eqv PAIR, 1, 2\n.word PAIR\n")
+    assert errors == [] and lines[1].expanded == ".word 1, 2"
 
 
 def test_eqv_is_lazy_and_applies_only_after_its_definition(tmp_path):

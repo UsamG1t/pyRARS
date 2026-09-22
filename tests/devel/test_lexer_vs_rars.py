@@ -13,6 +13,7 @@ import struct
 
 import pytest
 
+from pyrars.asm.expressions import evaluate, parse
 from pyrars.asm.lexer import Kind, tokenize_line
 from pyrars.isa.instructions import INSTRUCTIONS
 
@@ -44,9 +45,13 @@ def data_words(rars, tmp_path, lines):
 
 
 def token_value(text):
+    """Value of an integer expression, or of an optionally signed real number."""
     tokens, errors = tokenize_line(".dword " + text, OPERATORS)
     assert errors == []
-    return tokens[1].value
+    tokens = tokens[1:]
+    if tokens[-1].kind is Kind.REAL_NUMBER:
+        return -tokens[-1].value if tokens[0].text == "-" else tokens[-1].value
+    return evaluate(parse(tokens), None).number
 
 
 def words_of(bits64):
@@ -68,14 +73,11 @@ def test_real_literals(rars, tmp_path):
 
 ERROR_LINES = [
     ".word 1.2.3",
-    ".word %",
     ".word 'ab'",
     r".word '\q'",
     r".word '\400'",
     "\t.word 1e",
-    "addi t0, t0, 1 ^",
     ".word 0x",
-    ".word 1, 2 ~ 3",
     '.asciz "open',
 ]
 
@@ -145,8 +147,16 @@ def test_rars_java_artifacts_we_drop(rars, tmp_path):  # DEV-9
     # RARS exponent check looks at one character: "base-4" becomes one invalid word
     assert rars_messages(rars, tmp_path, ".data\nbase: .word 1\n.text\nla t0, base-4\n") == [
         (4, 8, "la t0, base-4\nInvalid language element: base-4")]
-    assert [t.text for t in tokenize_line("la t0, base-4", OPERATORS | {"la"})[0]] == ["la", "t0", "base", "-", "4"]
+    assert [t.text for t in tokenize_line("la t0, base-4", OPERATORS | {"la"})[0]] == ["la", "t0", ",", "base", "-", "4"]
     # ... and does not know the binary exponent of a hex real: "0x1p-2"
     assert rars_messages(rars, tmp_path, ".data\n.double 0x1p-2\n") == [
         (2, 9, ".double 0x1p-2\nInvalid language element: 0x1p")]
     assert token_value("0x1p-2") == 0.25
+
+
+def test_rars_has_no_expression_operators(rars, tmp_path):  # DEV-12, DEV-16
+    # RARS reports operator characters as invalid elements; for us they are operators
+    assert rars_messages(rars, tmp_path, ".data\n.word 1 ^ 2\n") == [
+        (2, 9, ".word 1 ^ 2\nInvalid language element: ^")]
+    assert [(t.kind, t.text) for t in tokenize_line(".word 1 ^ 2", OPERATORS)[0]][2] == (Kind.EXPR_OP, "^")
+    assert token_value("1 ^ 2") == 3

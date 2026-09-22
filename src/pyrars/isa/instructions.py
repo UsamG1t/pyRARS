@@ -239,12 +239,24 @@ INSTRUCTIONS = (
 )
 
 
+# Older names of instructions, still accepted (ISA manual, F extension:
+# "both the W and S versions will be supported by tools"; DEV-1).
+ALIASES = {"fmv.x.s": "fmv.x.w", "fmv.s.x": "fmv.w.x"}
+
+
 def instructions(xlen: int) -> tuple[Instr, ...]:
     """Basic instructions available in RV32 (xlen=32) or RV64 (xlen=64)."""
     return tuple(i for i in INSTRUCTIONS if i.exists_in(xlen))
 
 
+def mnemonics(xlen: int) -> frozenset[str]:
+    """Mnemonics of the basic instructions and their aliases, lower case."""
+    return frozenset(i.mnemonic for i in instructions(xlen)) | frozenset(ALIASES)
+
+
 def find(mnemonic: str, xlen: int) -> Instr | None:
+    """The basic instruction named mnemonic (lower case) or one of its aliases."""
+    mnemonic = ALIASES.get(mnemonic, mnemonic)
     for i in INSTRUCTIONS:
         if i.mnemonic == mnemonic and i.exists_in(xlen):
             return i

@@ -60,12 +60,21 @@ def _split_lines(text: str) -> list[str]:
     return lines
 
 
-def _statement_start(tokens: list[Token]) -> int:
-    """Index of the first token after a leading label ("name:" or "1:")."""
-    if (len(tokens) >= 2 and tokens[1].kind is Kind.COLON
-            and tokens[0].kind in (Kind.IDENTIFIER, Kind.OPERATOR, Kind.INTEGER)):
-        return 2
-    return 0
+def is_label(tokens: list[Token], index: int) -> bool:
+    """tokens[index:index + 2] is a label: "name:" (a name may be a mnemonic) or "1:"."""
+    if index + 1 >= len(tokens) or tokens[index + 1].kind is not Kind.COLON:
+        return False
+    name = tokens[index]
+    return (name.kind in (Kind.IDENTIFIER, Kind.OPERATOR)
+            or name.kind is Kind.INTEGER and name.text.isascii() and name.text.isdigit())
+
+
+def statement_start(tokens: list[Token]) -> int:
+    """Index of the first token after the leading labels (DEV-15: any number of them)."""
+    index = 0
+    while is_label(tokens, index):
+        index += 2
+    return index
 
 
 def _is_directive(tokens: list[Token], index: int, name: str) -> bool:
@@ -102,7 +111,7 @@ class _Reader:
 
     def read_line(self, file: str, number: int, text: str) -> None:
         tokens = self.tokenize(text, file, number)
-        start = _statement_start(tokens)
+        start = statement_start(tokens)
         if _is_directive(tokens, start, ".include"):
             if start:  # the label stays (DEV-10)
                 self.lines.append(SourceLine(file, number, text, text, tuple(tokens[:start])))
@@ -149,6 +158,8 @@ class _Reader:
     def define(self, file: str, number: int, text: str, tokens: list[Token], start: int) -> None:
         directive = tokens[start]
         operands = [t for t in tokens[start + 1:] if t.kind is not Kind.COMMENT]
+        if len(operands) > 1 and operands[1].kind is Kind.COMMA:  # .eqv symbol, text
+            del operands[1]
         if len(operands) < 2:
             self.error(file, number, directive.column, "Too few operands for .eqv directive")
             return
