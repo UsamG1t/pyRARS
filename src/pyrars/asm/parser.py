@@ -12,7 +12,7 @@ from dataclasses import dataclass
 
 from pyrars.asm.lexer import Kind, Token
 from pyrars.asm.source import SourceLine, is_label
-from pyrars.isa.program import Diagnostic, SourceLoc
+from pyrars.isa.program import Diagnostic
 
 
 @dataclass(frozen=True)
@@ -33,7 +33,7 @@ def parse_statement(line: SourceLine) -> tuple[Statement | None, list[Diagnostic
         index += 2
 
     def error(column: int, message: str) -> tuple[None, list[Diagnostic]]:
-        return None, [Diagnostic("Error", SourceLoc(line.file, line.line, column), message)]
+        return None, [Diagnostic("Error", line.loc(column), message)]
 
     if index == len(tokens):
         return Statement(line, tuple(labels), None, ()), []

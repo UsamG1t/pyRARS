@@ -8,7 +8,9 @@ from dataclasses import dataclass
 class SourceLoc:
     file: str
     line: int  # 1-based
-    column: int  # 1-based, as in RARS messages
+    column: int  # 1-based, as in RARS messages; 0 when the message has no column
+    # Macro calls that led to this line, outermost first (empty outside a macro).
+    calls: tuple["SourceLoc", ...] = ()
 
 
 @dataclass(frozen=True)
