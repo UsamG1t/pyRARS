@@ -29,7 +29,7 @@ _FENCE_BITS = {"i": 8, "o": 4, "r": 2, "w": 1}
 
 @dataclass(frozen=True)
 class Operand:
-    value: int | Expr  # a number, or an expression to evaluate
+    value: int | float | Expr  # a number, an expression, or a real number of a data directive
     text: str  # source text of the operand
     column: int
 

@@ -90,7 +90,7 @@ _LOCAL_LABEL = re.compile(r"([0-9]+)[bf]")
 _NAME = re.compile(r"[A-Za-z_.$][A-Za-z0-9_.$]*")
 _CHARACTER = re.compile(r"'(?:\\[0-7]{3}|\\.|[^'\\])'")  # 'c', '\e' or '\ooo'
 # Escapes of character literals (RARS): \' \" \\ \n \t \b \r \f \0
-_ESCAPES = {"'": 39, '"': 34, "\\": 92, "n": 10, "t": 9, "b": 8, "r": 13, "f": 12, "0": 0}
+ESCAPES = {"'": 39, '"': 34, "\\": 92, "n": 10, "t": 9, "b": 8, "r": 13, "f": 12, "0": 0}
 
 
 def parse_integer(text: str) -> int | None:
@@ -126,7 +126,7 @@ def _character_code(literal: str) -> int | None:
     if len(inner) == 4:
         code = int(inner[1:], 8)
         return code if code <= 255 else None
-    return _ESCAPES.get(inner[1])
+    return ESCAPES.get(inner[1])
 
 
 # ---------------------------------------------------------- classification
