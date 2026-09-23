@@ -103,6 +103,9 @@ def resolve(ref):
     ("lw a0, %lo(data + 4)(a0)", dict(rd=10, imm=4, rs1=10)),
     ("lui a0, %hi(data)", dict(rd=10, imm=0x10010)),
     ("fadd.s fa0, fa1, f2, rtz", dict(rd=10, rs1=11, rs2=2, rm=1)),
+    ("fadd.s fa0, fa1, f2", dict(rd=10, rs1=11, rs2=2, rm=7)),  # DEV-25: "dyn" by default
+    ("fsqrt.d fa0, fa1", dict(rd=10, rs1=11, rm=7)),
+    ("fcvt.w.s a0, fa0", dict(rd=10, rs1=10, rm=7)),
     ("fcvt.w.s a0, fa0, dyn", dict(rd=10, rs1=10, rm=7)),
     ("fsw fs0, 0(a0)", dict(rs2=8, imm=0, rs1=10)),
     ("fmv.x.s a0, fa0", dict(rd=10, rs1=10)),  # DEV-1 alias
@@ -135,6 +138,8 @@ def test_encoding_of_matched_operands():
     ("addi t0, t0", 1, '"addi": Too few or incorrectly formatted operands. Expected: addi rd, rs1, imm'),
     ("ADDI t0, t0, 1, 2", 1, '"ADDI": Too many or incorrectly formatted operands. Expected: addi rd, rs1, imm'),
     ("ecall 1", 1, '"ecall": Too many or incorrectly formatted operands. Expected: ecall'),
+    ("fadd.s fa0, fa1", 1, '"fadd.s": Too few or incorrectly formatted operands. '
+                           "Expected: fadd.s rd, rs1, rs2, rm"),  # only the rounding mode is optional
     ("lw t0, 8", 1, '"lw": Too few or incorrectly formatted operands. Expected: lw rd, imm(rs1)'),
     ("addi t0 t0, 1", 1, '"addi": Too few or incorrectly formatted operands. Expected: addi rd, rs1, imm'),
     ("add t0 t1, t2, t3", 1, '"add": Too many or incorrectly formatted operands. Expected: add rd, rs1, rs2'),

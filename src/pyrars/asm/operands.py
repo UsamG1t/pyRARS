@@ -6,7 +6,9 @@ modes, CSR names and fence sets become numbers here; immediates stay
 expressions until the assembler knows the symbols (field_value).
 
 Messages follow RARS (DEV-14: "Expected:" shows the syntax with field names);
-ranges are strict (DEV-13); fence sets may be letters (DEV-3).
+ranges are strict (DEV-13); fence sets may be letters (DEV-3); the rounding
+mode of a floating point instruction may be left out and is then "dyn"
+(DEV-25, GNU as).
 """
 
 import re
@@ -16,7 +18,8 @@ from pyrars.asm.expressions import Expr, ExprError, evaluate, parse
 from pyrars.asm.lexer import Kind, Token
 from pyrars.asm.parser import Statement
 from pyrars.isa.formats import B
-from pyrars.isa.spec import Csr, Instr, Offset, Reg, RoundingMode, SImm
+from pyrars.isa.registers import ROUNDING_MODES
+from pyrars.isa.spec import Csr, Field, Instr, Offset, Reg, RoundingMode, SImm
 
 _X_REGISTER = (Kind.REGISTER_NAME, Kind.REGISTER_NUMBER)
 _NOT_EXPRESSION = (*_X_REGISTER, Kind.FP_REGISTER_NAME, Kind.CSR_NAME, Kind.ROUNDING_MODE, Kind.QUOTED_STRING)
@@ -53,9 +56,14 @@ def match_operands(statement: Statement, instr: Instr) -> dict[str, Operand]:
         return OperandError(name.column, f'"{name.text}": Too {too} or incorrectly formatted operands. '
                                          f"Expected: {expected(instr)}")
 
+    default_rm = len(groups) == len(patterns) - 1 and patterns and patterns[-1][0] == "rm"
+    if default_rm:  # DEV-25: "fadd.s f1, f2, f3" means rounding mode "dyn"
+        patterns = patterns[:-1]
     if len(groups) != len(patterns):
         raise format_error("few" if len(groups) < len(patterns) else "many")
     operands = {}
+    if default_rm:
+        operands["rm"] = Operand(ROUNDING_MODES["dyn"], "dyn", name.column)
     for pattern, tokens in zip(patterns, groups):
         text = statement.line.expanded[tokens[0].column - 1:tokens[-1].end - 1]
         if len(pattern) == 4:  # imm ( rs1 )
@@ -63,22 +71,27 @@ def match_operands(statement: Statement, instr: Instr) -> dict[str, Operand]:
                 raise format_error("few")
             base = tokens[-2]
             if base.kind not in _X_REGISTER:
-                raise _incorrect_type(base)
+                raise incorrect_type(base)
             offset = tokens[:-3]
-            operands[pattern[0]] = Operand(_expression(offset) if offset else 0, text, tokens[0].column)
+            operands[pattern[0]] = Operand(expression(offset) if offset else 0, text, tokens[0].column)
             operands[pattern[2]] = Operand(base.value, base.text, base.column)
         else:
             operands[pattern[0]] = _single(instr, pattern[0], tokens, text, format_error)
     return operands
 
 
-def _incorrect_type(token: Token) -> OperandError:
+def incorrect_type(token: Token) -> OperandError:
     return OperandError(token.column, f'"{token.text}": operand is of incorrect type')
 
 
-def _expression(tokens: tuple[Token, ...]) -> Expr:
+def incorrect_type_of(operand: Operand) -> OperandError:
+    return OperandError(operand.column, f'"{operand.text}": operand is of incorrect type')
+
+
+def expression(tokens: tuple[Token, ...]) -> Expr:
+    """Expression of the tokens of one operand; raises OperandError."""
     if len(tokens) == 1 and tokens[0].kind in _NOT_EXPRESSION:
-        raise _incorrect_type(tokens[0])
+        raise incorrect_type(tokens[0])
     try:
         return parse(tokens)
     except ExprError as e:
@@ -96,14 +109,33 @@ def _single(instr: Instr, name: str, tokens: tuple[Token, ...], text: str, forma
         else:
             wanted = (Kind.FP_REGISTER_NAME,) if instr.is_fp(name) else _X_REGISTER
         if token.kind not in wanted:
-            raise _incorrect_type(token)
+            raise incorrect_type(token)
         return Operand(token.value, text, token.column)
     if kind is Csr and len(tokens) == 1 and token.kind is Kind.CSR_NAME:
         return Operand(token.value, text, token.column)
     if name in ("pred", "succ") and len(tokens) == 1 and token.kind is Kind.IDENTIFIER \
             and _FENCE_SET.fullmatch(token.text):
         return Operand(sum(_FENCE_BITS[c] for c in token.text), text, token.column)
-    return Operand(_expression(tokens), text, token.column)
+    return Operand(expression(tokens), text, token.column)
+
+
+def check_range(instr: Instr, name: str, value: int, operand: Operand) -> int:
+    """The value of a field, checked against its range; raises OperandError."""
+    field = instr.format.fields[name]
+    try:
+        field.check(value)
+    except ValueError:
+        raise OperandError(operand.column, _range_message(instr, field, value, operand)) from None
+    return value
+
+
+def _range_message(instr: Instr, field: Field, value: int, operand: Operand) -> str:
+    if field.kind is Offset:  # Offset exists only in the formats B and J
+        return ("Branch target word address beyond 12-bit range" if instr.format is B
+                else "Jump target word address beyond 20-bit range")
+    if field.kind is SImm and field.width == 12 and 2048 <= value <= 4095:
+        return f'"{operand.text}": Unsigned value is too large to fit into a sign-extended immediate'
+    return f'"{operand.text}": operand is out of range'
 
 
 def field_value(instr: Instr, name: str, operand: Operand, resolve, pc: int) -> int:
@@ -118,23 +150,8 @@ def field_value(instr: Instr, name: str, operand: Operand, resolve, pc: int) -> 
     value = evaluate(operand.value, resolve)
     if field.kind is Offset:  # a branch or jump target: an address
         if value.segment is None:
-            raise OperandError(operand.column, f'"{operand.text}": operand is of incorrect type')
-        number = value.number - pc
-        try:
-            field.check(number)
-        except ValueError:
-            message = ("Branch target word address beyond 12-bit range" if instr.format is B
-                       else "Jump target word address beyond 20-bit range")  # Offset exists only in B and J
-            raise OperandError(operand.column, message) from None
-        return number
+            raise incorrect_type_of(operand)
+        return check_range(instr, name, value.number - pc, operand)
     if value.segment is not None:
-        raise OperandError(operand.column, f'"{operand.text}": operand is of incorrect type')
-    try:
-        field.check(value.number)
-    except ValueError:
-        if field.kind is SImm and field.width == 12 and 2048 <= value.number <= 4095:
-            message = "Unsigned value is too large to fit into a sign-extended immediate"
-        else:
-            message = "operand is out of range"
-        raise OperandError(operand.column, f'"{operand.text}": {message}') from None
-    return value.number
+        raise incorrect_type_of(operand)
+    return check_range(instr, name, value.number, operand)

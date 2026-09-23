@@ -197,10 +197,19 @@ def evaluate(expr: Expr, resolve: Callable[[Symbol | LocalRef], Value]) -> Value
             return _binary(op, evaluate(left, resolve), evaluate(right, resolve), column)
         case Reloc(function, operand, column):
             number = evaluate(operand, resolve).number
-            if function == "hi":
-                return Value(((number + 0x800) >> 12) & 0xFFFFF)
-            return Value(((number & 0xFFF) ^ 0x800) - 0x800)
+            return Value(hi20(number) if function == "hi" else lo12(number))
     raise TypeError(expr)
+
+
+def hi20(number: int) -> int:
+    """Upper 20 bits of a 32-bit value for lui/auipc: %hi, corrected because
+    the lower part is added sign-extended."""
+    return ((number + 0x800) >> 12) & 0xFFFFF
+
+
+def lo12(number: int) -> int:
+    """Lower 12 bits as a signed value: %lo."""
+    return ((number & 0xFFF) ^ 0x800) - 0x800
 
 
 def _absolute(value: Value, op: str, column: int) -> int:
