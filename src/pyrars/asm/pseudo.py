@@ -441,12 +441,16 @@ def size(candidates: list[Candidate], resolve) -> int:
     return len(choose(candidates, resolve).pseudo.templates)
 
 
-def expand(candidate: Candidate, resolve, pc: int) -> list[Expanded]:
-    """Basic instructions of the expansion; pc is the address of the statement."""
+def expand(candidate: Candidate, resolve, pc: int, xlen: int = 32) -> list[Expanded]:
+    """Basic instructions of the expansion; pc is the address of the statement.
+
+    xlen is the width of the program: an instruction may be described
+    differently for RV32 and RV64 (`slli` holds 5 or 6 bits of shift amount).
+    """
     values = _values(candidate, resolve, strict=True)
     result = []
     for number, template in enumerate(candidate.pseudo.templates):
-        instr = basic(template.mnemonic, 64 if candidate.pseudo.xlen == 64 else 32)
+        instr = basic(template.mnemonic, xlen)
         fields = {}
         for name, part in zip(instr.operands, template.parts):
             value = _part_value(part, values, pc, pc + 4 * number)

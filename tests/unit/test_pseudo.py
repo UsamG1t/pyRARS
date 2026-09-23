@@ -47,13 +47,13 @@ def expansion(text, pc=TEXT, xlen=32, resolver=resolve):
     """(mnemonic, fields) of every basic instruction the statement becomes."""
     matched = candidates(text, xlen)
     chosen = pseudo.choose(matched, resolver, pseudo.size(matched, resolver))
-    return [(e.instr.mnemonic, e.fields) for e in pseudo.expand(chosen, resolver, pc)]
+    return [(e.instr.mnemonic, e.fields) for e in pseudo.expand(chosen, resolver, pc, xlen)]
 
 
 def words(text, pc=TEXT, xlen=32):
     matched = candidates(text, xlen)
     chosen = pseudo.choose(matched, resolve, pseudo.size(matched, resolve))
-    return [encode(e.instr, e.fields) for e in pseudo.expand(chosen, resolve, pc)]
+    return [encode(e.instr, e.fields) for e in pseudo.expand(chosen, resolve, pc, xlen)]
 
 
 # ------------------------------------------------------------------- the table
@@ -152,6 +152,23 @@ def test_a_target_in_a_later_template_uses_the_address_of_that_instruction():
     expanded = pseudo.expand(candidate, resolve, TEXT)
     assert [(e.instr.mnemonic, e.fields) for e in expanded] == [
         ("addi", dict(rd=0, rs1=0, imm=0)), ("jal", dict(rd=0, imm=0x10 - 4))]
+
+
+def test_the_expansion_takes_the_instruction_of_the_program_width():
+    """A row of both widths must use the description of the running width:
+    `slli` holds 5 bits of shift amount in RV32 and 6 in RV64. No row of the
+    table uses such an instruction today, so the rule is checked on a row
+    built here."""
+    row = pseudo.Pseudo("shift", "rd, rs", (pseudo.t("slli", pseudo.Reg(1), pseudo.Reg(2),
+                                                     pseudo.Const(40)),))
+    candidate = pseudo.Candidate(row, candidates("mv t0, t1")[0].operands)
+    expanded = pseudo.expand(candidate, resolve, TEXT, 64)
+    assert expanded[0].instr.format.__name__ == "Shift6"
+    assert encode(expanded[0].instr, expanded[0].fields) == 0x02831293  # slli x5, x6, 40
+    narrow = pseudo.expand(candidate, resolve, TEXT, 32)
+    assert narrow[0].instr.format.__name__ == "Shift5"
+    with pytest.raises(ValueError):  # 40 does not fit the 5 bits of RV32
+        encode(narrow[0].instr, narrow[0].fields)
 
 
 def test_addresses_split_into_upper_and_lower_parts():

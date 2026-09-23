@@ -123,7 +123,7 @@ class _Pass2:
         statement = placed.statement
         loc = statement.line.loc(statement.name.column)
         try:
-            words = self.words(placed, resolve)
+            words = self.words(placed, resolve, result.xlen)
         except (OperandError, ExprError) as e:
             self.error(replace(loc, column=e.column), e.message)
             words = [0] * (placed.size // 4)
@@ -135,7 +135,7 @@ class _Pass2:
                                           loc if number == 0 else None,
                                           statement.line.expanded if number == 0 else ""))
 
-    def words(self, placed: Placed, resolve) -> list[int]:
+    def words(self, placed: Placed, resolve, xlen: int) -> list[int]:
         statement = placed.statement
         if placed.instr is not None:
             return [self.basic_word(placed.instr, statement, resolve, placed.address)]
@@ -145,7 +145,8 @@ class _Pass2:
                                    "Extended (pseudo) instruction or format not permitted.  "
                                    "See Settings.")
             chosen = pseudo.choose(list(placed.candidates), resolve, placed.size // 4)
-            return [encode(e.instr, e.fields) for e in pseudo.expand(chosen, resolve, placed.address)]
+            expanded = pseudo.expand(chosen, resolve, placed.address, xlen)
+            return [encode(e.instr, e.fields) for e in expanded]
         return [encode_insn(statement, resolve, placed.address)]  # ".insn"
 
     def basic_word(self, instr: Instr, statement, resolve, address: int) -> int:

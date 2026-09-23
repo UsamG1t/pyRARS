@@ -111,7 +111,8 @@ def assemble(lines, symbols, xlen=32):
     for s, candidates, size in zip(statements, matched, sizes):
         if candidates:
             chosen = pseudo.choose(candidates, resolve, size)
-            words += [encode(e.instr, e.fields) for e in pseudo.expand(chosen, resolve, address)]
+            words += [encode(e.instr, e.fields)
+                      for e in pseudo.expand(chosen, resolve, address, xlen)]
         else:
             words.append(basic_word(s, resolve, address, xlen))
         address += 4 * size
