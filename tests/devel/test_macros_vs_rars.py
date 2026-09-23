@@ -161,7 +161,7 @@ def test_rars_behaviour_we_deviate_from(rars, tmp_path):
 
 
 def test_the_body_sees_the_eqv_of_the_call(rars, tmp_path):
-    """RARS applies every .eqv of the file to a body; we apply those of the call."""
+    """DEV-20: RARS applies every .eqv of the file to a body, we those of the call."""
     text = ".macro m\naddi t0, t0, K\n.end_macro\n.text\n.eqv K, 3\nm\n"
     result, errors = rars_messages(rars, tmp_path, text)
     assert errors == [] and result.text == [0x00328293]

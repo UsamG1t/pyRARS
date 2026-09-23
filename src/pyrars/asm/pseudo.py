@@ -52,9 +52,10 @@ class Imm:
 
 @dataclass(frozen=True)
 class Lo:
-    """Lower 12 bits of the value of the n-th operand."""
+    """Lower 12 bits of the value of the n-th operand, shifted right by `shift` first."""
 
     n: int
+    shift: int = 0
 
 
 @dataclass(frozen=True)
@@ -62,6 +63,16 @@ class Hi:
     """Upper 20 bits of that value, for lui."""
 
     n: int
+    shift: int = 0
+
+
+@dataclass(frozen=True)
+class Piece:
+    """`width` bits of the value of the n-th operand, starting at bit `shift`."""
+
+    n: int
+    shift: int
+    width: int
 
 
 @dataclass(frozen=True)
@@ -92,7 +103,7 @@ class Const:
     value: int
 
 
-type Part = Reg | Imm | Lo | Hi | PcLo | PcHi | Target | Const
+type Part = Reg | Imm | Lo | Hi | Piece | PcLo | PcHi | Target | Const
 
 
 @dataclass(frozen=True)
@@ -128,7 +139,9 @@ def t(mnemonic: str, *parts: Part) -> Template:
 
 _INTEGER_REGISTER = ("rd", "rs", "rt")
 _FP_REGISTER = ("fd", "fs", "ft")
-_RANGES = {"imm12": (-2048, 2047), "imm32": (-2**31, 2**32 - 1), "uimm5": (0, 31)}
+_RANGES = {"imm12": (-2048, 2047), "imm32": (-2**31, 2**32 - 1),
+           "simm32": (-2**31, 2**31 - 1), "imm64": (-2**63, 2**64 - 1),
+           "uimm5": (0, 31)}
 
 X0, RA = Const(0), Const(1)
 FCSR, FRM, FFLAGS = Const(0x003), Const(0x002), Const(0x001)
@@ -196,8 +209,18 @@ TABLE: tuple[Pseudo, ...] = (
     Pseudo("li", "rd, imm12", (t("addi", Reg(1), X0, Lo(2)),)),
     Pseudo("li", "rd, imm32", (t("lui", Reg(1), Hi(2)),
                                t("addi", Reg(1), Reg(1), Lo(2))), 32),
-    Pseudo("li", "rd, imm32", (t("lui", Reg(1), Hi(2)),
-                               t("addiw", Reg(1), Reg(1), Lo(2))), 64),
+    # RV64: two instructions reach a signed 32-bit value, because addiw extends
+    # the sign; anything else is built in four pieces of 32, 11, 11 and 10 bits
+    Pseudo("li", "rd, simm32", (t("lui", Reg(1), Hi(2)),
+                                t("addiw", Reg(1), Reg(1), Lo(2))), 64),
+    Pseudo("li", "rd, imm64", (t("lui", Reg(1), Hi(2, 32)),
+                               t("addiw", Reg(1), Reg(1), Lo(2, 32)),
+                               t("slli", Reg(1), Reg(1), Const(11)),
+                               t("addi", Reg(1), Reg(1), Piece(2, 21, 11)),
+                               t("slli", Reg(1), Reg(1), Const(11)),
+                               t("addi", Reg(1), Reg(1), Piece(2, 10, 11)),
+                               t("slli", Reg(1), Reg(1), Const(10)),
+                               t("addi", Reg(1), Reg(1), Piece(2, 0, 10))), 64),
     Pseudo("la", "rd, symbol", (t("auipc", Reg(1), PcHi(2)),
                                 t("addi", Reg(1), Reg(1), PcLo(2)))),
     Pseudo("lla", "rd, symbol", (t("auipc", Reg(1), PcHi(2)),
@@ -483,10 +506,12 @@ def _part_value(part: Part, values: tuple[Value, ...], pc: int, address: int) ->
             return value
         case Reg(n) | Imm(n):
             return values[n - 1].number
-        case Lo(n):
-            return lo12(values[n - 1].number)
-        case Hi(n):
-            return hi20(values[n - 1].number)
+        case Lo(n, shift):
+            return lo12(values[n - 1].number >> shift)
+        case Hi(n, shift):
+            return hi20(values[n - 1].number >> shift)
+        case Piece(n, shift, width):
+            return (values[n - 1].number >> shift) & ((1 << width) - 1)
         case PcLo(n):
             return lo12(values[n - 1].number - pc)
         case PcHi(n):

@@ -161,6 +161,17 @@ def test_same_pseudo_errors(rars, tmp_path, text, message):
     assert (2, error.value.column) == theirs[0][:2]
 
 
+def test_the_64_bit_li_matches_rars(rars, tmp_path):
+    """RV64: a value wider than 32 bits becomes the eight instructions of RARS."""
+    lines = ["li t0, 0x1122334455667788", "li t1, 0x100000000", "li t2, 5",
+             "li t3, 100000", "li t4, -1", "li t5, 0x7FFFFFFF"]
+    source = tmp_path / "li64.s"
+    source.write_text(".text\n" + "\n".join(lines) + "\n")
+    result = rars.assemble([source], ("rv64",))
+    assert result.messages == []
+    assert assemble(lines, {}, xlen=64) == result.text
+
+
 def rars_result(rars, tmp_path, text):
     source = tmp_path / "d.s"
     source.write_text(text)

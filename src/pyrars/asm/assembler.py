@@ -47,6 +47,7 @@ def assemble(paths: Sequence[str], options: Options = Options()) -> AssembledPro
     if options.warnings_are_errors:
         diagnostics = [d if d.kind != "Warning" else Diagnostic("Error", d.loc, d.message)
                        for d in diagnostics]
+    diagnostics = _without_repetitions(diagnostics)
     diagnostics.sort(key=_position)  # messages in the order of the source, not of the passes
 
     data_base, data = _data_image(code.data, options.config)
@@ -64,6 +65,17 @@ def assemble(paths: Sequence[str], options: Options = Options()) -> AssembledPro
         entry=entry,
         diagnostics=tuple(diagnostics),
     )
+
+
+def _without_repetitions(diagnostics: list[Diagnostic]) -> list[Diagnostic]:
+    """The same message at the same place twice says nothing new: both passes
+    may report a value that fits nowhere."""
+    seen, result = set(), []
+    for diagnostic in diagnostics:
+        if diagnostic not in seen:
+            seen.add(diagnostic)
+            result.append(diagnostic)
+    return result
 
 
 def _position(diagnostic: Diagnostic) -> tuple[str, int, int]:

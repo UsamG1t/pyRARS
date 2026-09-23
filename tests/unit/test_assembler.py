@@ -116,6 +116,21 @@ def test_a_value_that_does_not_fit_is_truncated_with_a_warning(tmp_path):
     assert program.data == bytes([0x2C, 0x00, 0x45, 0x23])
 
 
+def test_messages_follow_the_source_and_are_not_repeated(tmp_path):  # DEV-31
+    # pass 2 finds the error of line 2, pass 1 the one of line 5: the source decides
+    program = build(tmp_path, ".text\nla t0, missing\n.data\n.byte 300\n.align -1\n")
+    assert messages(program) == [
+        ("Error", 2, 8, 'Symbol "missing" not found in symbol table.'),
+        ("Warning", 4, 7, "value 0x0000012c is out-of-range and truncated to 0x0000002c"),
+        ("Error", 5, 1, '"-1": operand is out of range')]
+
+
+def test_a_value_that_fits_nowhere_is_reported_once(tmp_path):
+    # both passes meet it: pass 1 while choosing the variant, pass 2 while encoding
+    program = build(tmp_path, ".text\nli t0, 0x100000000\n")
+    assert messages(program) == [("Error", 2, 8, '"0x100000000": operand is out of range')]
+
+
 # ---------------------------------------------------------------- several files
 
 

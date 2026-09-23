@@ -161,7 +161,7 @@ def test_an_include_in_a_body_is_read_once(tmp_path):  # no "repeated include" w
 # -------------------------------------------------------------------- .eqv
 
 
-def test_the_body_sees_the_eqv_symbols_of_the_call(tmp_path):
+def test_the_body_sees_the_eqv_symbols_of_the_call(tmp_path):  # DEV-20
     lines, errors = read(tmp_path, ".macro m\naddi t0, t0, K\n.end_macro\n"
                                    ".eqv K, 2 + 3\nm\n")
     assert errors == []
