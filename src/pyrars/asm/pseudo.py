@@ -109,6 +109,7 @@ class Pseudo:
     syntax: str  # operand kinds, e.g. "rd, imm12" or "rd, imm12(rs)"
     templates: tuple[Template, ...]
     xlen: int | None = None  # None: both
+    alias: bool = False  # another name of a row above; not used when reading a word back
 
     def exists_in(self, xlen: int) -> bool:
         return self.xlen is None or self.xlen == xlen
@@ -151,14 +152,14 @@ def _memory(mnemonic: str, first: str, xlen: int | None = None) -> list[Pseudo]:
     ]
 
 
-def _csr_read(mnemonic: str, csr: Const) -> Pseudo:
-    return Pseudo(mnemonic, "rd", (t("csrrs", Reg(1), csr, X0),))
+def _csr_read(mnemonic: str, csr: Const, alias: bool = False) -> Pseudo:
+    return Pseudo(mnemonic, "rd", (t("csrrs", Reg(1), csr, X0),), alias=alias)
 
 
-def _csr_write(mnemonic: str, csr: Const) -> list[Pseudo]:
+def _csr_write(mnemonic: str, csr: Const, alias: bool = False) -> list[Pseudo]:
     """"<name> rd, rs" swaps the register with the CSR, "<name> rs" only writes it."""
-    return [Pseudo(mnemonic, "rd, rs", (t("csrrw", Reg(1), csr, Reg(2)),)),
-            Pseudo(mnemonic, "rs", (t("csrrw", X0, csr, Reg(1)),))]
+    return [Pseudo(mnemonic, "rd, rs", (t("csrrw", Reg(1), csr, Reg(2)),), alias=alias),
+            Pseudo(mnemonic, "rs", (t("csrrw", X0, csr, Reg(1)),), alias=alias)]
 
 
 TABLE: tuple[Pseudo, ...] = (
@@ -213,7 +214,7 @@ TABLE: tuple[Pseudo, ...] = (
     Pseudo("fgt.d", "rd, fs, ft", (t("flt.d", Reg(1), Reg(3), Reg(2)),)),
     Pseudo("fge.d", "rd, fs, ft", (t("fle.d", Reg(1), Reg(3), Reg(2)),)),
     # ------------------------------------------------------------------ branches
-    Pseudo("b", "symbol", (t("jal", X0, Target(1)),)),  # RARS
+    Pseudo("b", "symbol", (t("jal", X0, Target(1)),), alias=True),  # RARS, another name of "j"
     Pseudo("beqz", "rs, symbol", (t("beq", Reg(1), X0, Target(2)),)),
     Pseudo("bnez", "rs, symbol", (t("bne", Reg(1), X0, Target(2)),)),
     Pseudo("bgez", "rs, symbol", (t("bge", Reg(1), X0, Target(2)),)),
@@ -253,7 +254,7 @@ TABLE: tuple[Pseudo, ...] = (
     Pseudo("csrsi", "csr, uimm5", (t("csrrsi", X0, Imm(1), Imm(2)),)),
     Pseudo("csrci", "csr, uimm5", (t("csrrci", X0, Imm(1), Imm(2)),)),
     _csr_read("frcsr", FCSR),
-    _csr_read("frsr", FCSR),  # RARS alias
+    _csr_read("frsr", FCSR, alias=True),  # RARS, another name of "frcsr"
     _csr_read("frrm", FRM),
     _csr_read("frflags", FFLAGS),
     _csr_read("rdcycle", Const(0xC00)),
@@ -267,7 +268,7 @@ TABLE: tuple[Pseudo, ...] = (
     Pseudo("pause", "", (t("fence", Const(1), Const(0)),)),  # DEV-26
 )
 
-TABLE += tuple(p for name in ("fscsr", "fssr") for p in _csr_write(name, FCSR))
+TABLE += tuple(_csr_write("fscsr", FCSR)) + tuple(_csr_write("fssr", FCSR, alias=True))
 TABLE += tuple(_csr_write("fsrm", FRM)) + tuple(_csr_write("fsflags", FFLAGS))
 TABLE += tuple(p for name in ("lb", "lbu", "lh", "lhu", "lw") for p in _memory(name, "rd"))
 TABLE += tuple(p for name in ("lwu", "ld") for p in _memory(name, "rd", 64))

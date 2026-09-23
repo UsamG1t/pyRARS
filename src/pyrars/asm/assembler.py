@@ -47,6 +47,7 @@ def assemble(paths: Sequence[str], options: Options = Options()) -> AssembledPro
     if options.warnings_are_errors:
         diagnostics = [d if d.kind != "Warning" else Diagnostic("Error", d.loc, d.message)
                        for d in diagnostics]
+    diagnostics.sort(key=_position)  # messages in the order of the source, not of the passes
 
     data_base, data = _data_image(code.data, options.config)
     entry = code.symbols.get(START_LABEL, options.config.text_base) if options.start_at_main \
@@ -63,6 +64,12 @@ def assemble(paths: Sequence[str], options: Options = Options()) -> AssembledPro
         entry=entry,
         diagnostics=tuple(diagnostics),
     )
+
+
+def _position(diagnostic: Diagnostic) -> tuple[str, int, int]:
+    """Where a message belongs; one without a place comes first."""
+    loc = diagnostic.loc
+    return ("", 0, 0) if loc is None else (loc.file, loc.line, loc.column)
 
 
 def _data_image(memory: dict[int, int], config: MemoryConfig) -> tuple[int, bytes]:

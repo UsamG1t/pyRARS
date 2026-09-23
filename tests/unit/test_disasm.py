@@ -45,6 +45,33 @@ def test_a_word_that_is_no_instruction(word):
     assert text(word) is None
 
 
+@pytest.mark.parametrize("word, expected", [
+    (0x00000013, "nop"),
+    (0x00030293, "mv x5,x6"),
+    (0xFFF34293, "not x5,x6"),
+    (0x40600233, "neg x4,x6"),
+    (0x00008067, "ret"),  # the most specific name wins over "jr x1"
+    (0x00028067, "jr x5"),
+    (0x0080006F, "j 8"),  # not "b": that name of RARS is an alias
+    (0xFE0298E3, "bnez x5,-16"),
+    (0x0FF0000F, "fence"),
+    (0x0100000F, "pause"),
+    (0x003022F3, "frcsr x5"),  # more specific than "csrr x5,3"
+    (0x00329073, "fscsr x5"),
+    (0xC0002573, "rdcycle x10"),
+    (0x00128293, "addi x5,x5,1"),  # no pseudo-instruction: stays as it is
+])
+def test_pseudo_instructions_are_named(word, expected):
+    assert text(word, pseudos=True) == expected
+    assert text(word) == text(word, pseudos=False)
+
+
+def test_a_pseudo_instruction_of_several_words_stays_as_it_is():
+    # "li t0, 100000" is lui + addi; each word keeps its own name, as in objdump
+    assert text(0x000182B7, pseudos=True) == "lui x5,0x00018"
+    assert text(0x6A028293, pseudos=True) == "addi x5,x5,1696"
+
+
 def test_the_instruction_set_of_the_xlen_decides():
     word = encode(find("addiw", 64), dict(rd=5, rs1=5, imm=1))
     assert text(word, 64) == "addiw x5,x5,1"
