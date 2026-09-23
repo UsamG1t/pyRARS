@@ -14,6 +14,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass, replace
 
 from pyrars.asm import pseudo
+from pyrars.asm.disasm import text as disassemble
 from pyrars.asm.expressions import ExprError, LocalRef, Symbol, Value, evaluate
 from pyrars.asm.insn import encode_insn
 from pyrars.asm.operands import OperandError, field_value, match_operands
@@ -129,7 +130,8 @@ class _Pass2:
         for number, word in enumerate(words):
             address = placed.address + 4 * number
             self.check_address(address, loc)
-            self.entries.append(TextEntry(address, word, "",
+            basic = disassemble(word, result.xlen)  # empty: the word is no instruction (.insn)
+            self.entries.append(TextEntry(address, word, basic or "",
                                           loc if number == 0 else None,
                                           statement.line.expanded if number == 0 else ""))
 

@@ -28,7 +28,7 @@ class TextEntry:
 
     address: int
     word: int
-    basic: str  # basic instruction as text, e.g. "addi x5,x0,5"
+    basic: str  # the instruction as text (asm/disasm.py); empty if the word is none
     loc: SourceLoc | None  # None for the 2nd and later words of an expanded pseudo-instruction
     source: str  # source line text ("" when loc is None)
 
