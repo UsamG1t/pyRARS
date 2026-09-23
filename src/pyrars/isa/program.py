@@ -46,10 +46,16 @@ class DataItem:
 @dataclass(frozen=True)
 class AssembledProgram:
     xlen: int
+    mem_config: str  # name of the memory configuration (isa/memory.py)
     text: tuple[TextEntry, ...]
     data_base: int
-    data: bytes
+    data: bytes  # from data_base to the end of the last item
     data_layout: tuple[DataItem, ...]
     symbols: Mapping[str, int]
-    entry: int
+    globals: frozenset[str]
+    entry: int  # where the simulator starts
     diagnostics: tuple[Diagnostic, ...]
+
+    @property
+    def failed(self) -> bool:
+        return any(d.kind == "Error" for d in self.diagnostics)

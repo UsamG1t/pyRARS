@@ -40,7 +40,8 @@ from pyrars.isa.spec import Instr
 
 @dataclass(frozen=True)
 class Placed:
-    """An instruction with its address; `candidates` is empty for a basic one."""
+    """An instruction with its address: a basic one (`instr`), a pseudo-instruction
+    (`candidates`) or a ".insn" directive (neither of them)."""
 
     statement: Statement
     address: int
@@ -78,6 +79,7 @@ class Symbols:
     """Symbols of one program file."""
 
     values: dict[str, Value] = field(default_factory=dict)
+    where: dict[str, SourceLoc] = field(default_factory=dict)  # where a name was defined
     globals: set[str] = field(default_factory=set)
     constants: set[str] = field(default_factory=set)  # defined by .equ, may be redefined
     numeric: list[NumericLabel] = field(default_factory=list)
@@ -107,6 +109,10 @@ class Pass1:
     sections: tuple[tuple[str, int, int], ...]  # (name, first address, address after)
     symbols: Symbols
     diagnostics: tuple[Diagnostic, ...]
+    # where the next file of the program continues (RARS lays files out one after another)
+    text_end: int
+    data_end: int
+    extern_end: int
 
 
 # --------------------------------------------------------------- directives
@@ -122,16 +128,21 @@ _EXTENSIONS = frozenset(i.ext.lower() for i in INSTRUCTIONS) | {"i"}
 _NO_EFFECT = ("norvc", "nopic", "relax", "norelax")
 
 
-def run(lines: Sequence[SourceLine], xlen: int = 32, config: MemoryConfig = DEFAULT) -> Pass1:
-    """Place the statements of a program file (see the module docstring)."""
-    state = _Pass1(xlen, config)
+def run(lines: Sequence[SourceLine], xlen: int = 32, config: MemoryConfig = DEFAULT,
+        text: int | None = None, data: int | None = None, extern: int | None = None) -> Pass1:
+    """Place the statements of a program file (see the module docstring).
+
+    text, data and extern continue another file of the same program.
+    """
+    state = _Pass1(xlen, config, text, data, extern)
     for line in lines:
         state.line(line)
     return state.finish()
 
 
 class _Pass1:
-    def __init__(self, xlen: int, config: MemoryConfig) -> None:
+    def __init__(self, xlen: int, config: MemoryConfig, text: int | None = None,
+                 data: int | None = None, extern: int | None = None) -> None:
         self.xlen = xlen
         self.config = config
         self.symbols = Symbols()
@@ -142,13 +153,14 @@ class _Pass1:
         self.sections: list[tuple[str, int, int]] = []
         self.diagnostics: list[Diagnostic] = []
         self.section = "text"
-        self.pointers = {"text": config.text_base, "data": config.data_base}
-        self.extern = config.extern_base
+        self.pointers = {"text": config.text_base if text is None else text,
+                         "data": config.data_base if data is None else data}
+        self.extern = config.extern_base if extern is None else extern
         self.auto_align = True
         self.options: list[None] = []  # depth of .option push
         self.order = 0
         self.globals_declared: list[tuple[str, SourceLoc]] = []
-        self.section_start = config.text_base
+        self.section_start = self.pointers["text"]
 
     # ------------------------------------------------------------- helpers
 
@@ -234,6 +246,7 @@ class _Pass1:
             self.error(loc, f'label "{label.text}" already defined')
             return
         self.symbols.values[label.text] = Value(self.address, self.segment())
+        self.symbols.where[label.text] = loc
 
     def instruction(self, statement: Statement, line: SourceLine) -> None:
         loc = line.loc(statement.name.column)
@@ -310,7 +323,7 @@ class _Pass1:
         elif name == ".option":
             self.option(statement, loc)
         elif name == ".insn":
-            self.error(loc, '".insn" is not supported yet')
+            self.insn(statement, loc)
         else:
             self.error(loc, f'"{statement.name.text}" directive is invalid or not implemented')
 
@@ -336,6 +349,14 @@ class _Pass1:
                 self.error(statement.line.loc(tokens[0].column),
                            f'"{tokens[0].text}": a symbol name is expected')
         return names
+
+    def insn(self, statement: Statement, loc: SourceLoc) -> None:
+        """".insn" writes one instruction word, so it lives in the text segment."""
+        if not self.in_text:
+            self.error(loc, '".insn" directive cannot appear in data segment')
+            return
+        self.text.append(Placed(statement, self.address, 4, self.next_order(), None, ()))
+        self.address += 4
 
     # ----------------------------------------------------------- segments
 
@@ -516,6 +537,7 @@ class _Pass1:
         if name in self.symbols.values:
             return  # the same symbol declared in another file of the program
         self.symbols.values[name] = Value(self.extern, "data")
+        self.symbols.where[name] = loc
         self.symbols.globals.add(name)
         self.extern += size
 
@@ -533,6 +555,7 @@ class _Pass1:
         data = self.pointers["data"]
         data += -data % alignment
         self.symbols.values[names[0].text] = Value(data, "data")
+        self.symbols.where[names[0].text] = loc
         self.symbols.globals.add(names[0].text)
         self.layout.append(DataItem(data, size, statement.name.text.lower(), loc))
         self.pointers["data"] = data + size
@@ -551,6 +574,7 @@ class _Pass1:
         if number is None:
             return
         self.symbols.values[name] = Value(number)
+        self.symbols.where[name] = loc
         self.symbols.constants.add(name)
 
     # ------------------------------------------------------------- .option
@@ -598,7 +622,8 @@ class _Pass1:
                 self.error(loc, f'"{name}" declared global label but not defined.')
         return Pass1(self.config, self.xlen, tuple(self.text), tuple(self.chunks),
                      tuple(self.values), tuple(self.layout), tuple(self.sections),
-                     self.symbols, tuple(self.diagnostics))
+                     self.symbols, tuple(self.diagnostics),
+                     self.pointers["text"], self.pointers["data"], self.extern)
 
 
 # ------------------------------------------------------------------ helpers
