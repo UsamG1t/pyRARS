@@ -24,12 +24,7 @@ from math import isqrt
 
 from pyrars.softfloat.formats import (Format, decode, infinity, is_infinite, is_nan,
                                       is_signalling_nan, is_zero, sign, zero)
-from pyrars.softfloat.rounding import DZ, NV, RDN, round_value
-
-# Bits computed beyond the significand of the format before the sticky bit is
-# gathered: one for the rounding position, one to see whether it is a tie, and
-# one more so that setting the sticky bit can never disturb them.
-EXTRA = 3
+from pyrars.softfloat.rounding import DZ, EXTRA, NV, RDN, round_quotient, round_value
 
 
 def negate(bits: int, fmt: Format) -> int:
@@ -84,16 +79,7 @@ def divide(a: int, b: int, fmt: Format, mode: int) -> tuple[int, int]:
 
     _, ea, sa = decode(a, fmt)
     _, eb, sb = decode(b, fmt)
-    # The quotient is computed to EXTRA bits below the place where the format is
-    # cut: enough bits for a normal result, and low enough (the second term) for
-    # a subnormal one, whose bits end at least_exponent. What the division
-    # leaves over becomes the sticky bit.
-    shift = max(sb.bit_length() - sa.bit_length() + fmt.significand_bits + EXTRA,
-                ea - eb - fmt.least_exponent + EXTRA, 0)
-    quotient, rest = divmod(sa << shift, sb)
-    if rest:
-        quotient |= 1
-    return round_value(negative, ea - eb - shift, quotient, fmt, mode)
+    return round_quotient(negative, sa, sb, ea - eb, fmt, mode)
 
 
 def square_root(a: int, fmt: Format, mode: int) -> tuple[int, int]:

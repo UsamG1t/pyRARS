@@ -468,6 +468,11 @@ own size: one byte needs no alignment, 16-bit values are aligned to 2, 32-bit va
 to 4, 64-bit values and `.double` to 8. A label written in front of a value gets the address after
 that alignment.
 
+The values of `.float` and `.double` are converted by the floating point module of pyRARS
+(`pyrars.softfloat`), which reads the literal exactly and rounds it once to the format of the
+directive. A literal whose value is too large for that format is an error; one too small becomes a
+zero, and the words `Inf` and `NaN` are accepted.
+
 #### Alignment
 
 | Directive | Meaning |

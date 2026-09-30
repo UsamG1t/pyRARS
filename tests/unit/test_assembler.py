@@ -223,3 +223,42 @@ def test_insn_errors(tmp_path, source, message):
 def test_insn_belongs_to_the_text_segment(tmp_path):
     program = build(tmp_path, ".data\n.insn 0x13\n")
     assert [m[3] for m in messages(program)] == ['".insn" directive cannot appear in data segment']
+
+
+# ---------------------------------------------------- floating point values
+
+
+@pytest.mark.parametrize("source, image", [
+    (".data\n.float 0.1\n", (0x3DCCCCCD).to_bytes(4, "little")),
+    (".data\n.float -1.5\n", (0xBFC00000).to_bytes(4, "little")),
+    (".data\n.float Inf\n", (0x7F800000).to_bytes(4, "little")),
+    (".data\n.float -Inf\n", (0xFF800000).to_bytes(4, "little")),
+    (".data\n.float NaN\n", (0x7FC00000).to_bytes(4, "little")),
+    (".data\n.float 1e-46\n", bytes(4)),  # too small: zero, and no message
+    (".data\n.float 0x1.8p1\n", (0x40400000).to_bytes(4, "little")),
+    (".data\n.float 16777217\n", (0x4B800000).to_bytes(4, "little")),  # an integer, rounded
+    (".data\n.double 0.1\n", (0x3FB999999999999A).to_bytes(8, "little")),
+    (".data\n.double 1e-400\n", bytes(8)),
+])
+def test_a_floating_point_value(tmp_path, source, image):
+    program = build(tmp_path, source)
+    assert messages(program) == [] and program.data == image
+
+
+def test_a_literal_is_rounded_once(tmp_path):
+    """DEV-36: rounding to a double first and narrowing afterwards would give
+    0x3f800002 here, because the first rounding lands on the midpoint."""
+    literal = ("1.00000029802322387695312582718061255302767487140869206996285356581"
+               "21109008789062")
+    program = build(tmp_path, f".data\n.float {literal}\n")
+    assert messages(program) == []
+    assert program.data == (0x3F800003).to_bytes(4, "little")
+
+
+def test_a_value_too_large_for_its_format_is_refused(tmp_path):
+    """The message of RARS, for both formats (user decision 2026-09-30; RARS
+    refuses it for .float alone, DEV-42)."""
+    program = build(tmp_path, ".data\nv: .float 1.0, 1e40\nw: .double 1e400\n")
+    assert messages(program) == [
+        ("Error", 2, 16, '"1e40" is an out-of-range value'),
+        ("Error", 3, 12, '"1e400" is an out-of-range value')]

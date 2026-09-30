@@ -27,8 +27,11 @@ from pyrars.softfloat import formats
 from pyrars.softfloat.arith import (add, divide, fused_multiply_add, multiply, negate,
                                     square_root, subtract)
 from pyrars.softfloat.compare import equal, less, less_equal, maximum, minimum
+from pyrars.softfloat.convert import from_integer, to_format, to_integer
 from pyrars.softfloat.formats import BINARY32, BINARY64
-from pyrars.softfloat.rounding import NV, NX, OF, RDN, RMM, RNE, RTZ, RUP, round_value
+from pyrars.softfloat.rounding import (NV, NX, OF, RDN, RMM, RNE, RTZ, RUP, round_to_integer,
+                                       round_value)
+from pyrars.softfloat.text import from_text, to_text
 
 pytestmark = pytest.mark.devel
 
@@ -156,6 +159,9 @@ def test_classification_of_doubles(rars, tmp_path):
 
 
 def test_comparisons_and_extremes(rars, tmp_path):
+    """All hundred pairs of ten values. This is also where DEV-34 was withdrawn:
+    FEQ raises the invalid flag for a signalling NaN alone, in RARS as in the
+    manual, and only FLT and FLE differ, and only for an infinity (DEV-39)."""
     pairs = [(a, b) for a in SINGLES for b in SINGLES]
     body = ""
     for a, b in pairs:
@@ -473,3 +479,210 @@ def test_rars_fails_on_a_fused_product_with_an_infinite_addend(rars, tmp_path, m
                               BINARY32, RNE) == (negate(infinity, BINARY32), 0)
     assert fused_multiply_add(0x3FF0000000000000, 0x3FF0000000000000,
                               0x7FF0000000000000, BINARY64, RNE) == (0x7FF0000000000000, 0)
+
+
+# ------------------------------------------- stage 14: conversions and text
+
+# Values whose conversion to an integer is worth comparing: whole numbers, ties,
+# the ends of the integer ranges, and the values that have no integer at all.
+CONVERTED = (
+    0x00000000, 0x80000000, 0x3F800000, 0xBF800000, 0x40000000,
+    0x3F000000, 0xBF000000,  # 0.5 and -0.5: a tie whose truncation is zero
+    0x40200000, 0xC0200000,  # 2.5 and -2.5: a tie, the first place they differ
+    0x3FC00000, 0x40600000, 0x40900000,  # 1.5, 3.5, 4.5
+    0x4F000000, 0x4EFFFFFF, 0xCF000000,  # 2**31, the single below it, -2**31
+    0x501502F9, 0xD01502F9,  # 1e10 and -1e10, beyond a 32-bit integer
+    0x7F7FFFFF, 0x00000001, 0x7F800000, 0xFF800000, 0x7FC00000, 0x7F800001,
+)
+
+# Integers whose conversion to a single is worth comparing.
+INTEGERS = (0, 1, -1, 2, -2, 16777216, 16777217, 16777219, -16777217,
+            2147483647, -2147483648, 1000000000, -1000000000, 255)
+
+PRINTED32 = (
+    0x00000000, 0x80000000, 0x3F800000, 0xBF800000, 0x40000000, 0x3DCCCCCD,
+    0x3EAAAAAB, 0x3A83126F, 0x38D1B717, 0x44960000, 0x4B3C614E, 0x501502F9,
+    0x2EDBE6FF, 0x00800000, 0x7F7FFFFF, 0x7F800000, 0xFF800000, 0x7FC00000,
+    0x00000001, 0x007FFFFF, 0x33800000, 0xC0200000,
+)
+PRINTED64 = (
+    0x0000000000000000, 0x3FF0000000000000, 0x3FB999999999999A,
+    0x3FD5555555555555, 0x4341C37937E08000, 0x7FEFFFFFFFFFFFFF,
+    0x0010000000000000, 0xFFF0000000000000, 0x7FF8000000000000,
+    0x0000000000000001, 0x000FFFFFFFFFFFFF,
+)
+
+
+def exactly_a_half(bits: int) -> tuple[bool, int]:
+    """Whether the value lies exactly between two whole numbers, and the whole
+    number toward zero from it."""
+    if not formats.is_finite(bits, BINARY32):
+        return False, 0
+    negative, exponent, significand = formats.decode(bits, BINARY32)
+    truncated, _ = round_to_integer(negative, exponent, significand, RTZ)
+    if exponent >= 0:
+        return False, truncated
+    drop = -exponent
+    half = (significand >> (drop - 1)) & 1
+    rest = significand & ((1 << (drop - 1)) - 1)
+    return bool(half and not rest), truncated
+
+
+def their_conversion_flags(bits: int, flags: int, mode: int) -> int:
+    """DEV-41: when a conversion leaves the range of the integer, RARS keeps the
+    inexact flag of the rounding as well, which the manual forbids ("set the
+    Inexact exception flag if the rounded result differs from the operand value
+    and the Invalid exception flag is not set")."""
+    if not flags & NV or not formats.is_finite(bits, BINARY32):
+        return flags
+    _, inexact = round_to_integer(*formats.decode(bits, BINARY32), mode)
+    return flags | (NX if inexact else 0)
+
+
+def their_integer(bits: int, ours: int, mode: int, lowest: int, highest: int) -> int:
+    """DEV-35: at a tie RARS rounds away from zero, unless the whole number
+    toward zero is zero itself; every other rounding agrees with ours."""
+    if mode != RNE:
+        return ours
+    tie, truncated = exactly_a_half(bits)
+    if not tie or truncated == 0:
+        return ours
+    away = truncated + (1 if truncated > 0 else -1)
+    return max(lowest, min(highest, away))
+
+
+@pytest.mark.parametrize("mode", MODES)
+@pytest.mark.parametrize("signed", [True, False])
+def test_a_conversion_to_a_32_bit_integer(rars, tmp_path, mode, signed):
+    mnemonic = "fcvt.w.s" if signed else "fcvt.wu.s"
+    body = "".join(f"        flw ft0, {4 * i}(s0)\n"
+                   f"        {mnemonic} t0, ft0, {mode}\n        showi t0\n"
+                   for i in range(len(CONVERTED)))
+    source = (PREAMBLE + ".data\n" + data_block("v", CONVERTED, ".word")
+              + ".text\nmain:   la s0, v\n" + body + EPILOGUE)
+    rows = results(rars, tmp_path, source)
+    lowest = -(1 << 31) if signed else 0
+    highest = (1 << 31) - 1 if signed else (1 << 32) - 1
+    ties = 0
+    for bits, row in zip(CONVERTED, rows):
+        ours, flags = to_integer(bits, BINARY32, 32, signed, MODES[mode])
+        theirs = their_integer(bits, ours, MODES[mode], lowest, highest)
+        ties += theirs != ours
+        assert row == (theirs & 0xFFFFFFFF, their_conversion_flags(bits, flags, MODES[mode])), \
+            f"{mnemonic} {mode} {bits:08x}"
+    if mode == "rne":
+        assert ties, "the table must reach the ties of DEV-35"
+
+
+def test_a_conversion_from_a_32_bit_integer(rars, tmp_path):
+    body = ""
+    for mode in MODES:
+        body += "".join(f"        lw t0, {4 * i}(s0)\n"
+                        f"        fcvt.s.w ft1, t0, {mode}\n        showf ft1\n"
+                        for i in range(len(INTEGERS)))
+    source = (PREAMBLE + ".data\nv: .word "
+              + ", ".join(str(value) for value in INTEGERS) + "\n"
+              ".text\nmain:   la s0, v\n" + body + EPILOGUE)
+    rows = results(rars, tmp_path, source)
+    index = 0
+    for mode in MODES:
+        for value in INTEGERS:
+            assert rows[index] == from_integer(value, BINARY32, MODES[mode]), \
+                f"fcvt.s.w {mode} {value}"
+            index += 1
+
+
+def test_the_conversions_of_a_64_bit_machine(rars, tmp_path):
+    """fcvt.l.s and fcvt.lu.s need RV64, where an integer is 64 bits wide."""
+    body = "".join(f"        flw ft0, {4 * i}(s0)\n"
+                   "        fcvt.l.s t0, ft0, rne\n        showl t0\n"
+                   "        fcvt.lu.s t0, ft0, rne\n        showl t0\n"
+                   for i in range(len(CONVERTED)))
+    preamble = PREAMBLE + """\
+.macro showl %r
+        srli a0, %r, 32
+        jal print
+        slli a0, %r, 32
+        srli a0, a0, 32
+        jal print
+.end_macro
+"""
+    source = (preamble + ".data\n" + data_block("v", CONVERTED, ".word")
+              + ".text\nmain:   la s0, v\n" + body + EPILOGUE)
+    path = tmp_path / "p.s"
+    path.write_text(source)
+    done = rars.run([path], options=("rv64",))
+    assert done.messages == [] and done.exit_code == 0, done.stdout
+    rows = [(int(value, 16), int(flags, 16))
+            for value, flags in (line.split() for line in done.stdout.splitlines())]
+
+    index = 0
+    for bits in CONVERTED:
+        for signed in (True, False):
+            lowest = -(1 << 63) if signed else 0
+            highest = (1 << 63) - 1 if signed else (1 << 64) - 1
+            ours, flags = to_integer(bits, BINARY32, 64, signed, RNE)
+            theirs = their_integer(bits, ours, RNE, lowest, highest) & ((1 << 64) - 1)
+            # the macro prints the high half first, and each half clears the flags
+            assert rows[index] == (theirs >> 32, their_conversion_flags(bits, flags, RNE)), \
+                f"{bits:08x} {signed}"
+            assert rows[index + 1] == (theirs & 0xFFFFFFFF, 0), f"{bits:08x} {signed}"
+            index += 2
+
+
+def test_widening_a_single_to_a_double(rars, tmp_path):
+    body = "".join(f"        flw ft0, {4 * i}(s0)\n"
+                   "        fcvt.d.s ft1, ft0, rne\n        showd ft1\n"
+                   for i in range(len(PRINTED32)))
+    preamble = PREAMBLE + """\
+.macro showd %r
+        la s1, scratch
+        fsd %r, 0(s1)
+        lw a0, 4(s1)
+        jal print
+        lw a0, 0(s1)
+        jal print
+.end_macro
+"""
+    source = (preamble + ".data\nscratch: .dword 0\n" + data_block("v", PRINTED32, ".word")
+              + ".text\nmain:   la s0, v\n" + body + EPILOGUE)
+    rows = results(rars, tmp_path, source)
+    for index, bits in enumerate(PRINTED32):
+        ours, flags = to_format(bits, BINARY32, BINARY64, RNE)
+        assert rows[2 * index] == (ours >> 32, flags), f"fcvt.d.s {bits:08x}"
+        assert rows[2 * index + 1] == (ours & 0xFFFFFFFF, 0), f"fcvt.d.s {bits:08x}"
+
+
+def printed(rars, tmp_path, values, directive: str, load: str, service: int) -> list[str]:
+    """What RARS prints for every value with PrintFloat or PrintDouble."""
+    body = "".join(f"        {load} fa0, {(4 if directive == '.word' else 8) * i}(s0)\n"
+                   f"        li a7, {service}\n        ecall\n"
+                   "        li a0, 10\n        li a7, 11\n        ecall\n"
+                   for i in range(len(values)))
+    source = (".data\n" + data_block("v", values, directive)
+              + ".text\nmain:   la s0, v\n" + body
+              + "        li a7, 93\n        li a0, 0\n        ecall\n")
+    path = tmp_path / "p.s"
+    path.write_text(source)
+    done = rars.run([path])
+    assert done.messages == [] and done.exit_code == 0, done.stdout
+    return done.stdout.splitlines()
+
+
+@pytest.mark.parametrize("values, fmt, directive, load, service", [
+    (PRINTED32, BINARY32, ".word", "flw", 2),
+    (PRINTED64, BINARY64, ".dword", "fld", 3),
+])
+def test_the_decimal_text_of_a_value(rars, tmp_path, values, fmt, directive, load, service):
+    """DEV-37: the shape is the one of RARS, but where its own language writes a
+    digit more than is needed, our text is shorter. Both read back the same."""
+    theirs = printed(rars, tmp_path, values, directive, load, service)
+    shorter = 0
+    for bits, their_text in zip(values, theirs):
+        our_text = to_text(bits, fmt)
+        if our_text == their_text:
+            continue
+        shorter += 1
+        assert from_text(their_text, fmt)[0] == from_text(our_text, fmt)[0] == bits, their_text
+        assert len(our_text) <= len(their_text), f"{bits:x}: {our_text} vs {their_text}"
+    assert shorter, "the values must reach a case where the texts differ"

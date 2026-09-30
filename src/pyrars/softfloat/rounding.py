@@ -19,6 +19,11 @@ Sources: IEEE 754-2019 §4.3 (rounding directions), §7.4 (overflow) and §7.5
 
 from pyrars.softfloat.formats import Format, infinity, zero
 
+# Bits computed beyond the significand of the format before the rest of a value
+# is gathered into the sticky bit: one for the rounding position, one to see
+# whether it is a tie, and one more so that the sticky bit cannot disturb them.
+EXTRA = 3
+
 # Rounding modes, numbered as the rm field of an instruction.
 RNE = 0  # to nearest, a tie to the even significand
 RTZ = 1  # toward zero
@@ -81,6 +86,40 @@ def round_value(negative: bool, exponent: int, significand: int,
     field = result + fmt.bias
     return (zero(negative, fmt) | field << fmt.significand_bits
             | kept & fmt.significand_mask), flags
+
+
+def round_quotient(negative: bool, numerator: int, denominator: int, exponent: int,
+                   fmt: Format, mode: int) -> tuple[int, int]:
+    """Round (numerator / denominator) * 2**exponent to `fmt`.
+
+    A quotient rarely ends, so it is computed to EXTRA bits below the place
+    where the format is cut - low enough for a subnormal result as well - and
+    what the division leaves over is gathered into the lowest bit, the sticky
+    bit, which is all the rounding needs to know about it.
+    """
+    if numerator == 0:
+        return zero(negative, fmt), 0
+    shift = max(denominator.bit_length() - numerator.bit_length() + fmt.significand_bits + EXTRA,
+                exponent - fmt.least_exponent + EXTRA, 0)
+    quotient, rest = divmod(numerator << shift, denominator)
+    if rest:
+        quotient |= 1
+    return round_value(negative, exponent - shift, quotient, fmt, mode)
+
+
+def round_to_integer(negative: bool, exponent: int, significand: int,
+                     mode: int) -> tuple[int, bool]:
+    """The value rounded to a whole number, and whether anything was lost."""
+    if exponent >= 0:
+        whole = significand << exponent
+        return (-whole if negative else whole), False
+    drop = -exponent
+    kept = significand >> drop
+    half = (significand >> (drop - 1)) & 1
+    rest = significand & ((1 << (drop - 1)) - 1)
+    if (half or rest) and _round_away(mode, negative, kept, half, rest):
+        kept += 1
+    return (-kept if negative else kept), bool(half or rest)
 
 
 def _round_away(mode: int, negative: bool, kept: int, half: int, rest: int) -> bool:
