@@ -15,7 +15,8 @@ What differs on purpose, each stated on both sides here:
 
 import pytest
 
-from pyrars.core.memory import Fault, Memory
+from pyrars.core.memory import Memory
+from pyrars.core.traps import Trap
 from pyrars.core.options import Options
 from pyrars.isa.memory import DEFAULT
 
@@ -64,7 +65,7 @@ def fault_of(call) -> str:
     """The message of the fault a call raises, or "" when it raises none."""
     try:
         call()
-    except Fault as fault:
+    except Trap as fault:
         return fault.message
     return ""
 

@@ -33,6 +33,7 @@ from enum import Enum, auto
 from typing import Protocol
 
 from pyrars.core import traps
+from pyrars.core.traps import Trap
 from pyrars.core.options import Options
 from pyrars.isa.codec import Decoded, decode
 from pyrars.isa.program import AssembledProgram
@@ -80,17 +81,6 @@ class Fetched:
     address: int
     word: int
     instr: Decoded | None
-
-
-class Fault(Exception):
-    """An access the machine refuses. The simulator turns it into a trap, so
-    nothing of this reaches the user of the machine (INV-E)."""
-
-    def __init__(self, cause: int, address: int, message: str) -> None:
-        super().__init__(message)
-        self.cause = cause
-        self.address = address
-        self.message = message
 
 
 class Bus(Protocol):
@@ -190,7 +180,7 @@ class Memory:
         there, which means the program ran off the end of its text."""
         address &= ADDRESS_MASK
         if address % 4:
-            raise Fault(traps.INSTRUCTION_ADDRESS_MISALIGNED, address,
+            raise Trap(traps.INSTRUCTION_ADDRESS_MISALIGNED, address,
                         f"Instruction address not aligned to word boundary 0x{address:08x}")
         area = self._area(address)
         if area is Area.TEXT:
@@ -200,7 +190,7 @@ class Memory:
             if cached is not None:
                 return cached
         elif not (self.options.self_modifying and area is Area.DATA):
-            raise Fault(traps.INSTRUCTION_ACCESS_FAULT, address,
+            raise Trap(traps.INSTRUCTION_ACCESS_FAULT, address,
                         "Instruction load access error")
         word = int.from_bytes(self._get(address, 4), "little")
         fetched = Fetched(address, word, decode(word, self.options.xlen))
@@ -252,20 +242,20 @@ class Memory:
         return Area.NONE
 
     def _allowed(self, address: int, size: int, kind: Access) -> Area:
-        """The area of an access a program may make; raises Fault otherwise."""
+        """The area of an access a program may make; raises Trap otherwise."""
         reading = kind is Access.READ
         if size > 1 and address % size:
-            raise Fault(traps.LOAD_ADDRESS_MISALIGNED if reading
+            raise Trap(traps.LOAD_ADDRESS_MISALIGNED if reading
                         else traps.STORE_ADDRESS_MISALIGNED, address,
                         f"{'Load' if reading else 'Store'} address not aligned to "
                         f"{WIDTHS[size]} boundary 0x{address:08x}")
         area = self._area(address)
         if area is Area.TEXT and not self.options.self_modifying:
             verb = "read directly from" if reading else "write directly to"
-            raise Fault(traps.LOAD_ACCESS_FAULT if reading else traps.STORE_ACCESS_FAULT,
+            raise Trap(traps.LOAD_ACCESS_FAULT if reading else traps.STORE_ACCESS_FAULT,
                         address, f"Cannot {verb} text segment!0x{address:08x}")
         if area is Area.NONE:
-            raise Fault(traps.LOAD_ACCESS_FAULT if reading else traps.STORE_ACCESS_FAULT,
+            raise Trap(traps.LOAD_ACCESS_FAULT if reading else traps.STORE_ACCESS_FAULT,
                         address, f"address out of range 0x{address:08x}")
         return area
 

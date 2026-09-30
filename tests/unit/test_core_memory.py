@@ -9,8 +9,8 @@ recorded as DEV-43, DEV-44 and DEV-45.
 import pytest
 
 from pyrars.core import traps
-from pyrars.core.memory import (ADDRESS_MASK, Access, Area, Fault, MemAccess, Memory,
-                                PAGE_SIZE)
+from pyrars.core.memory import ADDRESS_MASK, Access, Area, MemAccess, Memory, PAGE_SIZE
+from pyrars.core.traps import Trap
 from pyrars.core.options import Options
 from pyrars.isa.memory import COMPACT_DATA_AT_ZERO, COMPACT_TEXT_AT_ZERO, DEFAULT
 from pyrars.isa.program import AssembledProgram, TextEntry
@@ -96,11 +96,11 @@ def test_the_areas_of_a_configuration_follow_its_table(config):
 def test_an_address_of_no_area_is_out_of_range(address):
     m = memory()
     for size in (1, 4):
-        with pytest.raises(Fault) as raised:
+        with pytest.raises(Trap) as raised:
             m.read(address, size)
         assert raised.value.cause == traps.LOAD_ACCESS_FAULT
         assert raised.value.message == f"address out of range 0x{address:08x}"
-    with pytest.raises(Fault) as raised:
+    with pytest.raises(Trap) as raised:
         m.write(address, 4, 0)
     assert raised.value.cause == traps.STORE_ACCESS_FAULT
 
@@ -130,13 +130,13 @@ def test_an_access_must_be_aligned_to_its_own_width(size, name):
     eight bytes not at all. DEV-45: its four messages read differently."""
     m = memory()
     for offset in range(1, size):
-        with pytest.raises(Fault) as raised:
+        with pytest.raises(Trap) as raised:
             m.read(DATA + offset, size)
         assert raised.value.cause == traps.LOAD_ADDRESS_MISALIGNED
         assert raised.value.message == (
             f"Load address not aligned to {name} boundary 0x{DATA + offset:08x}")
 
-        with pytest.raises(Fault) as raised:
+        with pytest.raises(Trap) as raised:
             m.write(DATA + offset, size, 0)
         assert raised.value.cause == traps.STORE_ADDRESS_MISALIGNED
         assert raised.value.message == (
@@ -155,11 +155,11 @@ def test_a_byte_needs_no_alignment():
 
 def test_a_program_cannot_touch_its_own_text():
     m = memory()
-    with pytest.raises(Fault) as raised:
+    with pytest.raises(Trap) as raised:
         m.read(TEXT, 4)
     assert raised.value.cause == traps.LOAD_ACCESS_FAULT
     assert raised.value.message == f"Cannot read directly from text segment!0x{TEXT:08x}"
-    with pytest.raises(Fault) as raised:
+    with pytest.raises(Trap) as raised:
         m.write(TEXT, 4, 0)
     assert raised.value.cause == traps.STORE_ACCESS_FAULT
     assert raised.value.message == f"Cannot write directly to text segment!0x{TEXT:08x}"
@@ -186,7 +186,7 @@ def test_the_alignment_rule_is_checked_before_the_text_rule():
     """Verified in RARS: a misaligned access to the text gives the alignment
     message, not the one about the text segment."""
     m = memory()
-    with pytest.raises(Fault) as raised:
+    with pytest.raises(Trap) as raised:
         m.read(TEXT + 2, 4)
     assert raised.value.cause == traps.LOAD_ADDRESS_MISALIGNED
 
@@ -223,7 +223,7 @@ def test_fetching_asks_the_decoder_once():
 def test_a_fetch_must_be_aligned():
     m = memory()
     m.load(program([(TEXT, 0x00100513)]))
-    with pytest.raises(Fault) as raised:
+    with pytest.raises(Trap) as raised:
         m.fetch(TEXT + 2)
     assert raised.value.cause == traps.INSTRUCTION_ADDRESS_MISALIGNED
     assert raised.value.message == (
@@ -233,7 +233,7 @@ def test_a_fetch_must_be_aligned():
 def test_a_fetch_outside_the_text_is_refused():
     m = memory()
     m.write(DATA, 4, 0x00100513)
-    with pytest.raises(Fault) as raised:
+    with pytest.raises(Trap) as raised:
         m.fetch(DATA)
     assert raised.value.cause == traps.INSTRUCTION_ACCESS_FAULT
     assert raised.value.message == "Instruction load access error"
@@ -244,7 +244,7 @@ def test_with_self_modifying_code_a_fetch_outside_the_text_is_allowed():
     m.write(DATA, 4, 0x00100513)
     assert m.fetch(DATA).instr.instr.mnemonic == "addi"
     # but only where memory exists at all
-    with pytest.raises(Fault):
+    with pytest.raises(Trap):
         m.fetch(DEFAULT.kernel_base)
 
 

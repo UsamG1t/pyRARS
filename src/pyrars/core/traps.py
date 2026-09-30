@@ -14,3 +14,17 @@ LOAD_ACCESS_FAULT = 5
 STORE_ADDRESS_MISALIGNED = 6
 STORE_ACCESS_FAULT = 7
 ENVIRONMENT_CALL = 8
+
+
+class Trap(Exception):
+    """An instruction that cannot be carried out: a refused access, an illegal
+    instruction, a call of the environment. The simulator turns it into a trap of
+    the machine, writing `cause` into ucause and `value` into utval, so nothing
+    of this reaches the user of the machine (INV-E).
+    """
+
+    def __init__(self, cause: int, value: int, message: str) -> None:
+        super().__init__(message)
+        self.cause = cause
+        self.value = value
+        self.message = message
