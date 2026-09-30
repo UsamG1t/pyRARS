@@ -92,6 +92,7 @@ def assemble(files: list[Path], options: tuple[str, ...] = ()) -> Result:
 class RunResult:
     exit_code: int
     stdout: str  # what the program printed, plus the messages of RARS
+    stderr: str  # a Java stack trace when RARS itself fails
     messages: list[Message]
 
 
@@ -109,6 +110,7 @@ def run(files: list[Path], options: tuple[str, ...] = (), max_steps: int = 200_0
     return RunResult(
         exit_code=done.returncode,
         stdout=done.stdout,
+        stderr=done.stderr,
         messages=parse_messages(done.stdout),
     )
 
