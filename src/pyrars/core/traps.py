@@ -9,6 +9,7 @@ the pending slots, the priority and the entry into a handler - is built in stage
 INSTRUCTION_ADDRESS_MISALIGNED = 0
 INSTRUCTION_ACCESS_FAULT = 1
 ILLEGAL_INSTRUCTION = 2
+BREAKPOINT = 3  # what `ebreak` raises; the simulator stops on it (stage 22)
 LOAD_ADDRESS_MISALIGNED = 4
 LOAD_ACCESS_FAULT = 5
 STORE_ADDRESS_MISALIGNED = 6
