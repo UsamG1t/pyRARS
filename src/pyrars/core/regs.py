@@ -24,6 +24,11 @@ from pyrars.softfloat.formats import box, unbox
 COUNT = 32
 
 
+def as_signed(value: int, bits: int) -> int:
+    """An unsigned value read as the number it stands for in two's complement."""
+    return value - (1 << bits) if value >> (bits - 1) else value
+
+
 class Registers:
     """x0..x31 and the program counter.
 
@@ -45,8 +50,7 @@ class Registers:
 
     def signed(self, number: int) -> int:
         """The value as the number it stands for in two's complement."""
-        value = self.values[number]
-        return value - (1 << self.options.xlen) if value > self.mask >> 1 else value
+        return as_signed(self.values[number], self.options.xlen)
 
     def write(self, number: int, value: int) -> None:
         if number:  # x0 keeps its zero

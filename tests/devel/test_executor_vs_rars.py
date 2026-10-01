@@ -30,9 +30,10 @@ EXIT = "        li a7, 93\n        li a0, 0\n        ecall\n"
 STEPS = 100_000
 
 
-def ours(source: str, tmp_path, xlen: int) -> tuple[dict[int, int], list[int]]:
-    """The registers and the first eight words of the data segment our machine
-    leaves behind."""
+def ours(source: str, tmp_path, xlen: int,
+         words: int = WORDS) -> tuple[dict[int, int], list[int]]:
+    """The registers and the first words of the data segment our machine leaves
+    behind."""
     path = tmp_path / "p.s"
     path.write_text(source)
     program = assemble([str(path)], AsmOptions(xlen=xlen))
@@ -53,14 +54,15 @@ def ours(source: str, tmp_path, xlen: int) -> tuple[dict[int, int], list[int]]:
     else:
         raise AssertionError("the program does not end")
     return ({number: machine.x.read(number) for number in range(1, 32)},
-            [machine.memory.peek(DATA + 4 * index, 4) for index in range(WORDS)])
+            [machine.memory.peek(DATA + 4 * index, 4) for index in range(words)])
 
 
-def theirs(rars, tmp_path, xlen: int) -> tuple[dict[int, int], list[int]]:
+def theirs(rars, tmp_path, xlen: int,
+           words: int = WORDS) -> tuple[dict[int, int], list[int]]:
     path = tmp_path / "p.s"
     names = tuple(f"x{number}" for number in range(1, 32))
     options = ((("rv64",) if xlen == 64 else ())
-               + (f"{DATA:#x}-{DATA + 4 * WORDS - 4:#x}",) + names)
+               + (f"{DATA:#x}-{DATA + 4 * words - 4:#x}",) + names)
     done = rars.run([path], options=options)
     assert done.messages == [], done.stdout
 
@@ -279,3 +281,289 @@ done:   csrrs t2, instret, x0
                         if line.startswith("x7")][0], 16)
     registers, _ = ours(source, tmp_path, 32)
     assert registers[7] == theirs_count
+
+
+# ------------------------------------------- stage 18: the floating point part
+
+# The programs keep their results in memory, because the command line of RARS
+# prints only 32 bits of a register, and they read fflags into an integer
+# register, so that the flags of every operation are compared as well.
+FLOAT_PROGRAMS = {
+    "single arithmetic": """\
+.data
+out:    .space 64
+one:    .float 1.0
+three:  .float 3.0
+big:    .float 3.4e38
+tiny:   .float 1e-44
+.text
+main:   la s1, out
+        la t0, one
+        flw ft0, 0(t0)
+        la t0, three
+        flw ft1, 0(t0)
+        fadd.s ft2, ft0, ft1, rne
+        fsw ft2, 0(s1)
+        fsub.s ft2, ft0, ft1, rne
+        fsw ft2, 4(s1)
+        fmul.s ft2, ft1, ft1, rne
+        fsw ft2, 8(s1)
+        fdiv.s ft2, ft0, ft1, rne
+        fsw ft2, 12(s1)
+        fsqrt.s ft2, ft1, rne
+        fsw ft2, 16(s1)
+        csrrs t2, fflags, x0
+        la t0, big
+        flw ft3, 0(t0)
+        fmul.s ft2, ft3, ft3, rne
+        fsw ft2, 20(s1)
+        la t0, tiny
+        flw ft4, 0(t0)
+        fmul.s ft2, ft4, ft4, rne
+        fsw ft2, 24(s1)
+        csrrs t3, fflags, x0
+""",
+    "rounding modes": """\
+.data
+out:    .space 64
+one:    .float 1.0
+three:  .float 3.0
+.text
+main:   la s1, out
+        la t0, one
+        flw ft0, 0(t0)
+        la t0, three
+        flw ft1, 0(t0)
+        fdiv.s ft2, ft0, ft1, rne
+        fsw ft2, 0(s1)
+        fdiv.s ft2, ft0, ft1, rtz
+        fsw ft2, 4(s1)
+        fdiv.s ft2, ft0, ft1, rdn
+        fsw ft2, 8(s1)
+        fdiv.s ft2, ft0, ft1, rup
+        fsw ft2, 12(s1)
+        fdiv.s ft2, ft0, ft1, rmm
+        fsw ft2, 16(s1)
+        csrrwi x0, frm, 1
+        fdiv.s ft2, ft0, ft1, dyn
+        fsw ft2, 20(s1)
+        csrrwi x0, frm, 3
+        fdiv.s ft2, ft0, ft1, dyn
+        fsw ft2, 24(s1)
+        csrrs t2, fcsr, x0
+""",
+    "double arithmetic and the fused ones": """\
+.data
+out:    .space 64
+done:   .double 1.0
+dthree: .double 3.0
+.text
+main:   la s1, out
+        la t0, done
+        fld ft0, 0(t0)
+        la t0, dthree
+        fld ft1, 0(t0)
+        fdiv.d ft2, ft0, ft1, rne
+        fsd ft2, 0(s1)
+        fsqrt.d ft2, ft1, rne
+        fsd ft2, 8(s1)
+        fmadd.d ft2, ft1, ft1, ft0, rne
+        fsd ft2, 16(s1)
+        fnmsub.d ft2, ft1, ft1, ft0, rne
+        fsd ft2, 24(s1)
+        csrrs t2, fflags, x0
+""",
+    "comparisons and classes": """\
+.data
+out:    .space 32
+one:    .float 1.0
+three:  .float 3.0
+nan:    .word 0x7fc00000
+snan:   .word 0x7f800001
+nzero:  .word 0x80000000
+.text
+main:   la t0, one
+        flw ft0, 0(t0)
+        la t0, three
+        flw ft1, 0(t0)
+        la t0, nan
+        flw ft2, 0(t0)
+        la t0, snan
+        flw ft3, 0(t0)
+        la t0, nzero
+        flw ft4, 0(t0)
+        feq.s t0, ft0, ft0
+        flt.s t1, ft0, ft1
+        fle.s t2, ft1, ft0
+        feq.s t3, ft2, ft0
+        csrrs s2, fflags, x0
+        flt.s t4, ft2, ft0
+        csrrs s3, fflags, x0
+        feq.s t5, ft3, ft0
+        csrrs s4, fflags, x0
+        fclass.s t6, ft0
+        fclass.s s5, ft4
+        fclass.s s6, ft2
+        fclass.s s7, ft3
+        la s1, out
+        fmin.s ft5, ft0, ft1
+        fsw ft5, 0(s1)
+        fmax.s ft5, ft4, ft0
+        fsw ft5, 4(s1)
+        fmin.s ft5, ft2, ft1
+        fsw ft5, 8(s1)
+        fsgnj.s ft5, ft0, ft4
+        fsw ft5, 12(s1)
+        fsgnjn.s ft5, ft0, ft4
+        fsw ft5, 16(s1)
+        fsgnjx.s ft5, ft0, ft4
+        fsw ft5, 20(s1)
+""",
+    "conversions": """\
+.data
+out:    .space 64
+pi:     .float 3.14159265
+npi:    .float -3.14159265
+big:    .float 3e9
+dpi:    .double 3.14159265358979
+.text
+main:   la s1, out
+        la t0, pi
+        flw ft0, 0(t0)
+        la t0, npi
+        flw ft1, 0(t0)
+        la t0, big
+        flw ft2, 0(t0)
+        fcvt.w.s t3, ft0, rtz
+        fcvt.w.s t4, ft1, rtz
+        fcvt.w.s t5, ft2, rtz
+        fcvt.wu.s t6, ft1, rtz
+        csrrs s2, fflags, x0
+        fcvt.w.s s3, ft0, rne
+        fcvt.w.s s4, ft0, rup
+        li s5, -7
+        fcvt.s.w ft3, s5, rne
+        fsw ft3, 0(s1)
+        fcvt.s.wu ft3, s5, rne
+        fsw ft3, 4(s1)
+        fcvt.d.s ft4, ft0, rne
+        fsd ft4, 8(s1)
+        la t0, dpi
+        fld ft5, 0(t0)
+        fcvt.s.d ft6, ft5, rne
+        fsw ft6, 16(s1)
+        fcvt.w.d s6, ft5, rtz
+        fcvt.d.w ft7, s5, rne
+        fsd ft7, 24(s1)
+        csrrs s7, fflags, x0
+""",
+    "moves and boxing": """\
+.data
+out:    .space 32
+dval:   .dword 0x1122334455667788
+one:    .float 1.0
+.text
+main:   la s1, out
+        la t0, dval
+        fld ft0, 0(t0)
+        la t0, one
+        flw ft1, 0(t0)
+        fmv.x.w t1, ft0
+        fmv.x.w t2, ft1
+        li t3, 0xc0000000
+        fmv.w.x ft2, t3
+        fsw ft2, 0(s1)
+        fsd ft2, 8(s1)
+        fadd.s ft3, ft0, ft1, rne
+        fsw ft3, 16(s1)
+        csrrs t4, fflags, x0
+        fsw ft0, 20(s1)
+""",
+}
+
+WIDE_FLOAT_PROGRAMS = {
+    "the wide conversions": """\
+.data
+out:    .space 64
+big:    .float 4.6e18
+npi:    .float -3.14159265
+.text
+main:   la s1, out
+        la t0, big
+        flw ft0, 0(t0)
+        la t0, npi
+        flw ft1, 0(t0)
+        fcvt.l.s t2, ft0, rtz
+        sd t2, 0(s1)
+        fcvt.lu.s t3, ft0, rtz
+        sd t3, 8(s1)
+        fcvt.l.s t4, ft1, rtz
+        sd t4, 16(s1)
+        fcvt.wu.s t5, ft0, rtz
+        sd t5, 24(s1)
+        csrrs s2, fflags, x0
+        li t6, -3
+        fcvt.s.l ft2, t6, rne
+        fsw ft2, 32(s1)
+        fcvt.s.lu ft3, t6, rne
+        fsw ft3, 36(s1)
+        fcvt.d.l ft4, t6, rne
+        fsd ft4, 40(s1)
+        fmv.x.d s3, ft0
+        sd s3, 48(s1)
+        fmv.d.x ft5, s3
+        fsd ft5, 56(s1)
+""",
+}
+
+
+@pytest.mark.parametrize("name", list(FLOAT_PROGRAMS))
+def test_a_program_of_floating_point_instructions(rars, tmp_path, name):
+    source = FLOAT_PROGRAMS[name] + EXIT
+    assert ours(source, tmp_path, 32, words=16) == theirs(rars, tmp_path, 32, words=16)
+
+
+@pytest.mark.parametrize("name", list(WIDE_FLOAT_PROGRAMS))
+def test_a_floating_point_program_of_a_64_bit_machine(rars, tmp_path, name):
+    source = WIDE_FLOAT_PROGRAMS[name] + EXIT
+    our_registers, our_words = ours(source, tmp_path, 64, words=16)
+    their_registers, their_words = theirs(rars, tmp_path, 64, words=16)
+    assert {number: value & 0xFFFFFFFF for number, value in our_registers.items()} \
+        == their_registers
+    assert our_words == their_words
+
+
+def test_a_nan_operand_of_an_operation(rars, tmp_path):  # DEV-32, DEV-33
+    """The one place where the machines part over floating point: RARS hands a
+    NaN operand back as it is and raises no flag, while we give the canonical NaN
+    and raise the invalid flag for a signalling one. The flags travel through the
+    machine the same way in both cases, which is what this test is for."""
+    source = """\
+.data
+out:    .space 16
+qnan:   .word 0x7fc00001
+snan:   .word 0x7f800001
+one:    .float 1.0
+.text
+main:   la s1, out
+        la t0, qnan
+        flw ft0, 0(t0)
+        la t0, snan
+        flw ft1, 0(t0)
+        la t0, one
+        flw ft2, 0(t0)
+        fadd.s ft3, ft0, ft2, rne
+        fsw ft3, 0(s1)
+        csrrs t3, fflags, x0
+        csrrw x0, fflags, x0
+        fadd.s ft4, ft1, ft2, rne
+        fsw ft4, 4(s1)
+        csrrs t4, fflags, x0
+""" + EXIT
+    our_registers, our_words = ours(source, tmp_path, 32, words=4)
+    their_registers, their_words = theirs(rars, tmp_path, 32, words=4)
+
+    assert our_words[:2] == [0x7FC00000, 0x7FC00000]  # the canonical NaN twice
+    assert their_words[:2] == [0x7FC00001, 0x7F800001]  # the operands themselves
+    assert (our_registers[28], our_registers[29]) == (0, 0x10)  # nothing, then invalid
+    assert (their_registers[28], their_registers[29]) == (0, 0)

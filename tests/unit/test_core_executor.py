@@ -328,11 +328,14 @@ def test_a_word_that_encodes_no_instruction():
     assert raised.value.value == 0x11223344
 
 
-def test_a_floating_point_instruction_waits_for_the_next_stage():
-    m = machine(word("fadd.s", rd=1, rs1=2, rs2=3, rm=0))
+@pytest.mark.parametrize("mnemonic", ["uret", "wfi"])
+def test_the_instructions_of_the_traps_wait_for_stage_19(mnemonic):
+    """Everything else is carried out: the floating point instructions came in
+    stage 18, and these two belong to the traps."""
+    m = machine(word(mnemonic))
     with pytest.raises(Trap) as raised:
         step(m)
-    assert raised.value.message == '"fadd.s" is not carried out yet'
+    assert raised.value.message == f'"{mnemonic}" is not carried out yet'
 
 
 # ------------------------------------------------------------------ a program

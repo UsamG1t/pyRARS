@@ -21,15 +21,11 @@ Extension (the table of division by zero and of the one overflow), and "Zicsr"
 (which forms write and which only read).
 """
 
-from pyrars.core import traps
+from pyrars.core import floats, traps
 from pyrars.core.machine import Machine
 from pyrars.core.memory import Fetched
+from pyrars.core.regs import as_signed
 from pyrars.core.traps import Trap
-
-
-def as_signed(value: int, bits: int) -> int:
-    """An unsigned value read as the number it stands for in two's complement."""
-    return value - (1 << bits) if value >> (bits - 1) else value
 
 
 # ----------------------------------------------------------- the arithmetic
@@ -156,8 +152,11 @@ def _carry_out(machine: Machine, mnemonic: str, operands: dict[str, int],
         if BRANCHES[mnemonic](left, right, width):
             machine.x.pc = (address + operands["imm"]) & machine.mask
         return
+    if mnemonic in floats.MNEMONICS:
+        floats.execute(machine, mnemonic, operands)
+        return
     handler = HANDLERS.get(mnemonic)
-    if handler is None:  # the floating point instructions until stage 18
+    if handler is None:  # `uret` and `wfi`, which belong to the traps of stage 19
         raise Trap(traps.ILLEGAL_INSTRUCTION, 0, f'"{mnemonic}" is not carried out yet')
     handler(machine, operands, address)
 
