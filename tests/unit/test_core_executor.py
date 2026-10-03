@@ -16,7 +16,7 @@ from pyrars.core.machine import Machine
 from pyrars.core.options import Options
 from pyrars.core.traps import BREAKPOINT, ENVIRONMENT_CALL, ILLEGAL_INSTRUCTION, Trap
 from pyrars.isa.codec import encode
-from pyrars.isa.instructions import find
+from pyrars.isa.instructions import find, instructions
 from pyrars.isa.memory import DEFAULT
 from pyrars.isa.registers import CSRS
 
@@ -328,14 +328,17 @@ def test_a_word_that_encodes_no_instruction():
     assert raised.value.value == 0x11223344
 
 
-@pytest.mark.parametrize("mnemonic", ["uret", "wfi"])
-def test_the_instructions_of_the_traps_wait_for_stage_19(mnemonic):
-    """Everything else is carried out: the floating point instructions came in
-    stage 18, and these two belong to the traps."""
-    m = machine(word(mnemonic))
-    with pytest.raises(Trap) as raised:
-        step(m)
-    assert raised.value.message == f'"{mnemonic}" is not carried out yet'
+def test_every_instruction_of_the_set_is_carried_out():
+    """Nothing is left over: the floating point instructions came in stage 18,
+    `uret` and `wfi` with the traps of stage 19 (where they are tested)."""
+    from pyrars.core import floats
+    from pyrars.core.executor import (BRANCHES, HANDLERS, IMMEDIATE_FORMS, LOADS,
+                                      REGISTER_FORMS, SHIFT_FORMS, STORES)
+    known = (set(HANDLERS) | set(REGISTER_FORMS) | set(IMMEDIATE_FORMS) | set(SHIFT_FORMS)
+             | set(LOADS) | set(STORES) | set(BRANCHES) | floats.MNEMONICS)
+    for xlen in (32, 64):
+        assert [instr.mnemonic for instr in instructions(xlen)
+                if instr.mnemonic not in known] == []
 
 
 # ------------------------------------------------------------------ a program

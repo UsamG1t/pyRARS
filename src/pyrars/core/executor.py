@@ -26,6 +26,7 @@ from pyrars.core.machine import Machine
 from pyrars.core.memory import Fetched
 from pyrars.core.regs import as_signed
 from pyrars.core.traps import Trap
+from pyrars.isa.registers import CSRS
 
 
 # ----------------------------------------------------------- the arithmetic
@@ -156,7 +157,7 @@ def _carry_out(machine: Machine, mnemonic: str, operands: dict[str, int],
         floats.execute(machine, mnemonic, operands)
         return
     handler = HANDLERS.get(mnemonic)
-    if handler is None:  # `uret` and `wfi`, which belong to the traps of stage 19
+    if handler is None:  # every instruction of the set has its place by now
         raise Trap(traps.ILLEGAL_INSTRUCTION, 0, f'"{mnemonic}" is not carried out yet')
     handler(machine, operands, address)
 
@@ -206,6 +207,22 @@ def _ebreak(machine: Machine, operands: dict[str, int], address: int) -> None:
     raise Trap(traps.BREAKPOINT, 0, "ebreak")
 
 
+def _uret(machine: Machine, operands: dict[str, int], address: int) -> None:
+    """Back from a handler: what interrupts were allowed before is allowed again,
+    and the machine carries on where `uepc` says."""
+    status = machine.csr.read(CSRS["ustatus"])
+    allowed = traps.UIE_BIT if status & traps.UPIE_BIT else 0
+    machine.csr.poke("ustatus", (status & ~(traps.UIE_BIT | traps.UPIE_BIT)) | allowed)
+    machine.x.pc = machine.csr.read(CSRS["uepc"]) & machine.mask
+
+
+def _wfi(machine: Machine, operands: dict[str, int], address: int) -> None:
+    """Wait for an interrupt. With an external or timer event already waiting
+    there is nothing to wait for; otherwise the simulator is told so."""
+    if machine.pending.external is None and machine.pending.timer is None:
+        raise traps.Waiting()
+
+
 def _fence(machine: Machine, operands: dict[str, int], address: int) -> None:
     """Nothing to order: the memory of the machine answers in the order it is
     asked, and there is no cache between them."""
@@ -253,6 +270,7 @@ def _csr_set_or_clear(machine: Machine, operands: dict[str, int], bits: int,
 HANDLERS = {
     "lui": _lui, "auipc": _auipc, "jal": _jal, "jalr": _jalr,
     "ecall": _ecall, "ebreak": _ebreak, "fence": _fence, "fence.i": _fence,
+    "uret": _uret, "wfi": _wfi,
     "csrrw": _csrrw, "csrrs": _csrrs, "csrrc": _csrrc,
     "csrrwi": _csrrwi, "csrrsi": _csrrsi, "csrrci": _csrrci,
 }

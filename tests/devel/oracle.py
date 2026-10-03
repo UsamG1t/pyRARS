@@ -97,7 +97,7 @@ class RunResult:
 
 
 def run(files: list[Path], options: tuple[str, ...] = (), max_steps: int = 200_000,
-        stdin: str = "") -> RunResult:
+        stdin: str = "", timeout: int = 120) -> RunResult:
     """Assemble and run a program with RARS; the program reports through syscalls."""
     if not available():
         raise RuntimeError("RARS oracle needs `java` in PATH and " + str(JAR))
@@ -106,7 +106,7 @@ def run(files: list[Path], options: tuple[str, ...] = (), max_steps: int = 200_0
         *options,
         *(str(f) for f in files),
     ]
-    done = subprocess.run(command, capture_output=True, text=True, input=stdin, timeout=120)
+    done = subprocess.run(command, capture_output=True, text=True, input=stdin, timeout=timeout)
     return RunResult(
         exit_code=done.returncode,
         stdout=done.stdout,

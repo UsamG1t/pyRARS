@@ -14,12 +14,10 @@ output.
 
 import pytest
 
+import driver
 from pyrars.asm.assembler import Options as AsmOptions
 from pyrars.asm.assembler import assemble
-from pyrars.core.executor import execute
-from pyrars.core.machine import Machine
 from pyrars.core.options import Options
-from pyrars.core.traps import ENVIRONMENT_CALL, Trap
 from pyrars.isa.memory import DEFAULT
 
 pytestmark = pytest.mark.devel
@@ -27,34 +25,19 @@ pytestmark = pytest.mark.devel
 DATA = DEFAULT.data_base
 WORDS = 8  # words of the data segment that are compared
 EXIT = "        li a7, 93\n        li a0, 0\n        ecall\n"
-STEPS = 100_000
 
 
 def ours(source: str, tmp_path, xlen: int,
          words: int = WORDS) -> tuple[dict[int, int], list[int]]:
     """The registers and the first words of the data segment our machine leaves
-    behind."""
+    behind, after the loop of `driver.py`."""
     path = tmp_path / "p.s"
     path.write_text(source)
     program = assemble([str(path)], AsmOptions(xlen=xlen))
     assert program.diagnostics == (), program.diagnostics
-
-    machine = Machine(Options(xlen=xlen))
-    machine.load(program)
-    for _ in range(STEPS):
-        fetched = machine.fetch()
-        if fetched is None:
-            break
-        try:
-            execute(machine, fetched)
-        except Trap as trap:
-            assert trap.cause == ENVIRONMENT_CALL, trap.message
-            break  # the exit at the end of the program
-        machine.csr.retire()
-    else:
-        raise AssertionError("the program does not end")
-    return ({number: machine.x.read(number) for number in range(1, 32)},
-            [machine.memory.peek(DATA + 4 * index, 4) for index in range(words)])
+    outcome = driver.run(program, Options(xlen=xlen))
+    assert outcome.reason == "exit", outcome.reason
+    return outcome.registers, outcome.words(DATA, words)
 
 
 def theirs(rars, tmp_path, xlen: int,

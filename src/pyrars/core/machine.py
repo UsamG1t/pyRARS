@@ -12,6 +12,7 @@ from pyrars.core.csr import ControlRegisters
 from pyrars.core.memory import Bus, Fetched, Memory
 from pyrars.core.options import Options
 from pyrars.core.regs import FloatRegisters, Registers
+from pyrars.core.traps import Pending
 from pyrars.isa.program import AssembledProgram
 
 
@@ -27,6 +28,7 @@ class Machine:
         self.x = Registers(options)
         self.f = FloatRegisters()
         self.csr = ControlRegisters(options, clock)
+        self.pending = Pending()  # the events waiting to be taken (core/traps.py)
 
     def load(self, program: AssembledProgram) -> None:
         """Put a program in memory and set the program counter where it starts."""
