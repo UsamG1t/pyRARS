@@ -14,7 +14,7 @@ import pytest
 from pyrars.core.executor import as_signed, execute
 from pyrars.core.machine import Machine
 from pyrars.core.options import Options
-from pyrars.core.traps import BREAKPOINT, ENVIRONMENT_CALL, ILLEGAL_INSTRUCTION, Trap
+from pyrars.core.traps import BREAKPOINT, ILLEGAL_INSTRUCTION, Trap
 from pyrars.isa.codec import encode
 from pyrars.isa.instructions import find, instructions
 from pyrars.isa.memory import DEFAULT
@@ -302,15 +302,20 @@ def test_a_read_only_register_can_be_read_but_not_written():
     assert raised.value.message == "Attempt to write to read-only CSR"
 
 
-@pytest.mark.parametrize("mnemonic, cause, message", [
-    ("ecall", ENVIRONMENT_CALL, "ecall"),
-    ("ebreak", BREAKPOINT, "ebreak"),
-])
-def test_the_calls_of_the_environment(mnemonic, cause, message):
-    m = machine(word(mnemonic))
+def test_a_breakpoint_is_raised_for_the_simulator():
+    m = machine(word("ebreak"))
     with pytest.raises(Trap) as raised:
         step(m)
-    assert (raised.value.cause, raised.value.message) == (cause, message)
+    assert (raised.value.cause, raised.value.message) == (BREAKPOINT, "ebreak")
+
+
+def test_a_call_of_the_environment_reaches_the_services():
+    """What each service does is in test_core_syscalls.py; here it is enough that
+    `ecall` arrives there, which a number nobody serves shows."""
+    m = machine(word("ecall"), x17=777)
+    with pytest.raises(Trap) as raised:
+        step(m)
+    assert raised.value.message == "invalid or unimplemented syscall service: 777"
 
 
 def test_a_fence_does_nothing_but_move_on():

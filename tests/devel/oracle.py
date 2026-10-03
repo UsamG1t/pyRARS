@@ -97,14 +97,19 @@ class RunResult:
 
 
 def run(files: list[Path], options: tuple[str, ...] = (), max_steps: int = 200_000,
-        stdin: str = "", timeout: int = 120) -> RunResult:
-    """Assemble and run a program with RARS; the program reports through syscalls."""
+        stdin: str = "", timeout: int = 120, arguments: tuple[str, ...] = ()) -> RunResult:
+    """Assemble and run a program with RARS; the program reports through syscalls.
+
+    `arguments` are the arguments of the program: RARS takes them after `pa`, which
+    has to come last of all, after the files.
+    """
     if not available():
         raise RuntimeError("RARS oracle needs `java` in PATH and " + str(JAR))
     command = [
         JAVA, "-jar", str(JAR), "nc", f"ae{ASSEMBLY_ERROR_EXIT}", "se1", str(max_steps),
         *options,
         *(str(f) for f in files),
+        *(("pa", *arguments) if arguments else ()),
     ]
     done = subprocess.run(command, capture_output=True, text=True, input=stdin, timeout=timeout)
     return RunResult(

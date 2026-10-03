@@ -21,7 +21,7 @@ Extension (the table of division by zero and of the one overflow), and "Zicsr"
 (which forms write and which only read).
 """
 
-from pyrars.core import floats, traps
+from pyrars.core import floats, syscalls, traps
 from pyrars.core.machine import Machine
 from pyrars.core.memory import Fetched
 from pyrars.core.regs import as_signed
@@ -200,7 +200,8 @@ def _jalr(machine: Machine, operands: dict[str, int], address: int) -> None:
 
 
 def _ecall(machine: Machine, operands: dict[str, int], address: int) -> None:
-    raise Trap(traps.ENVIRONMENT_CALL, 0, "ecall")
+    """A request to the world outside: `core/syscalls.py` serves it."""
+    syscalls.call(machine)
 
 
 def _ebreak(machine: Machine, operands: dict[str, int], address: int) -> None:
