@@ -33,6 +33,7 @@ from enum import Enum, auto
 from typing import Protocol
 
 from pyrars.core import traps
+from pyrars.core.history import Kind
 from pyrars.core.traps import Trap
 from pyrars.core.options import Options
 from pyrars.isa.codec import Decoded, decode
@@ -110,6 +111,7 @@ class Memory:
         self._filled: set[int] = set()  # addresses of the text segment that hold a word
         self._fetched: dict[int, Fetched] = {}  # what fetch already read and decoded
         self._watchers: list[_Watch] = []
+        self.journal = None  # the machine puts `core/history.py` here
 
     # ------------------------------------------------------------- the program
 
@@ -152,8 +154,11 @@ class Memory:
         area = self._allowed(address, size, Access.WRITE)
         value &= (1 << (8 * size)) - 1
         if area is Area.DEVICES and self.bus is not None:
+            # what a device did with a write is the device's own to undo
             self.bus.write(address, size, value)
         else:
+            if self.journal is not None:
+                self._keep(address, size)
             self._put(address, value.to_bytes(size, "little"))
             if area is Area.TEXT:
                 self._text_changed(address, size)
@@ -173,6 +178,8 @@ class Memory:
         if data:
             self._allowed(address, 1, Access.WRITE)
             self._allowed((address + len(data) - 1) & ADDRESS_MASK, 1, Access.WRITE)
+        if self.journal is not None:
+            self._keep(address, len(data))
         self._put(address, data)
 
     def fetch(self, address: int) -> Fetched | None:
@@ -206,11 +213,40 @@ class Memory:
         return int.from_bytes(self._get(address & ADDRESS_MASK, size), "little")
 
     def poke(self, address: int, size: int, value: int) -> None:
-        """Put bytes anywhere, by the same right as the loader."""
+        """Put bytes anywhere, by the same right as the loader.
+
+        A write of a tool is no step of the machine, so it is not written down
+        and a step back does not undo it.
+        """
         address &= ADDRESS_MASK
         self._put(address, (value & ((1 << (8 * size)) - 1)).to_bytes(size, "little"))
         if self._area(address) is Area.TEXT:
             self._text_changed(address, size)
+
+    def _keep(self, address: int, count: int) -> None:
+        """Write down what a run of bytes holds, for a step back.
+
+        A write into the text segment also makes words of it hold an
+        instruction; which words did not before is part of the record, so that
+        taking the write back leaves the text as empty as it was.
+        """
+        unfilled: tuple[int, ...] = ()
+        if self._area(address) is Area.TEXT:
+            first = address - address % 4
+            unfilled = tuple(word for word in range(first, address + count, 4)
+                             if word not in self._filled)
+        self.journal.record(Kind.MEMORY, address, (self._get(address, count), unfilled))
+
+    def restore(self, address: int, data: bytes, unfilled: tuple[int, ...] = ()) -> None:
+        """Put back what a step overwrote (`core/history.py`): the bytes as they
+        were, the words of the text that held nothing empty again, and nothing
+        read of them before kept."""
+        self._put(address, data)
+        first = address - address % 4
+        for word in range(first, address + len(data), 4):
+            self._fetched.pop(word, None)
+        for word in unfilled:
+            self._filled.discard(word)
 
     def subscribe(self, kind: Access, callback: Callable[[MemAccess], None],
                   low: int = 0, high: int = ADDRESS_MASK) -> Callable[[], None]:

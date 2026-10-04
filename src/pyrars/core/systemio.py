@@ -16,6 +16,14 @@ convention of the standard, where RARS answers -1 to everything).
 The flags of `open` are those of the standard: 0 read, 1 write, 2 read and write,
 9 (write and append). RARS documents the first, the second and the fourth; the
 third costs nothing and breaks nothing (D20).
+
+A world can also be asked where it stands (`mark`) and to go back there
+(`rewind`), which is how a step back of `core/history.py` takes the world with
+it under a debugger: what the program read is handed out again, the files stand
+where they stood, and text the world owns is taken back. The record is kept
+whatever the machine does with it; `Options.debug` only decides whether a step
+back reads it (user decision 2026-10-04). What has really left - a line on a
+terminal, bytes written into a file, a file opened or closed - stays as it is.
 """
 
 import errno
@@ -64,6 +72,10 @@ class SystemIO(Protocol):
 
     def dialog(self, kind: Dialog, message: str, payload: object) -> object: ...
 
+    def mark(self) -> object: ...
+
+    def rewind(self, mark: object) -> None: ...
+
 
 class ConsoleIO:
     """The world as a text session: two streams out, one in, and real files."""
@@ -74,6 +86,8 @@ class ConsoleIO:
         self.errors = errors if errors is not None else sys.stderr
         self.reader = reader if reader is not None else sys.stdin
         self.files: dict[int, IO[bytes]] = {}
+        self.taken = ""  # everything read from the input, kept for a step back
+        self.cursor = 0  # how much of it the program has read
 
     # ------------------------------------------------------------- the streams
 
@@ -88,13 +102,32 @@ class ConsoleIO:
 
     def read(self, fd: int, count: int) -> bytes:
         if fd == STANDARD_INPUT:
-            return self.reader.read(count).encode()
+            return self._input(count).encode()
         return self._file(fd).read(count)
 
     def read_line(self) -> str:
         """One line of the input, with its newline where there was one; the text
         is empty at the end of the input."""
-        return self.reader.readline()
+        end = self.taken.find("\n", self.cursor)
+        if end >= 0:  # a line the program has read before and read back
+            line = self.taken[self.cursor:end + 1]
+        else:
+            line = self.taken[self.cursor:] + self.reader.readline()
+            self.taken = self.taken[:self.cursor] + line
+        self.cursor += len(line)
+        return line
+
+    def _input(self, count: int) -> str:
+        """Characters of the input: those the program has read before first, the
+        rest from the reader. Everything read is kept, so that a step back can
+        hand it out again."""
+        text = self.taken[self.cursor:self.cursor + count]
+        if len(text) < count:
+            more = self.reader.read(count - len(text))
+            self.taken += more
+            text += more
+        self.cursor += len(text)
+        return text
 
     # --------------------------------------------------------------- the files
 
@@ -149,3 +182,44 @@ class ConsoleIO:
         if not answer:
             return ("", -3)
         return (answer, 0)
+
+    # ------------------------------------------------------ going back with a step
+
+    def mark(self) -> object:
+        """Where the world stands: what the program has read, how much has been
+        written, and where every open file is."""
+        return (self.cursor, _position(self.out), _position(self.errors),
+                {fd: file.tell() for fd, file in self.files.items()})
+
+    def rewind(self, mark: object) -> None:
+        """Back to a mark: what was read is handed out again, the files go back to
+        where they were, and written text is taken back where the world owns it -
+        a buffer can be cut, a terminal cannot. Bytes already in a file stay, so a
+        program run forward again writes the same bytes in the same place."""
+        cursor, out, errors, positions = mark
+        self.cursor = cursor
+        _cut(self.out, out)
+        _cut(self.errors, errors)
+        for fd, place in positions.items():
+            file = self.files.get(fd)  # a file closed since is simply gone
+            if file is not None:
+                file.seek(place)
+
+
+def _position(stream: IO[str]) -> int | None:
+    """How much of a stream has been written, where that can be told at all."""
+    try:
+        return stream.tell() if stream.seekable() else None
+    except (OSError, ValueError):
+        return None
+
+
+def _cut(stream: IO[str], length: int | None) -> None:
+    """Take back the text of an undone step, where the world owns it."""
+    if length is None:
+        return
+    try:
+        stream.seek(length)
+        stream.truncate()
+    except (OSError, ValueError):
+        pass

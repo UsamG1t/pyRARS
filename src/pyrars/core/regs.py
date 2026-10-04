@@ -17,6 +17,7 @@ Sources: R-REG in `rars-behavior.md`; ISA manual v20260120, chapter D ("NaN
 boxing of narrower values") and chapter F for the bit moves.
 """
 
+from pyrars.core.history import Kind
 from pyrars.core.options import Options
 from pyrars.isa.registers import X_NAMES
 from pyrars.softfloat.formats import box, unbox
@@ -39,6 +40,7 @@ class Registers:
 
     def __init__(self, options: Options = Options(), pc: int | None = None) -> None:
         self.options = options
+        self.journal = None  # the machine puts `core/history.py` here
         self.mask = (1 << options.xlen) - 1
         self.values = [0] * COUNT
         self.values[X_NAMES.index("sp")] = options.config.stack_pointer & self.mask
@@ -54,6 +56,8 @@ class Registers:
 
     def write(self, number: int, value: int) -> None:
         if number:  # x0 keeps its zero
+            if self.journal is not None:
+                self.journal.record(Kind.X, number, self.values[number])
             self.values[number] = value & self.mask
 
 
@@ -62,13 +66,20 @@ class FloatRegisters:
 
     def __init__(self) -> None:
         self.values = [0] * COUNT
+        self.journal = None  # the machine puts `core/history.py` here
+
+    def _set(self, number: int, value: int) -> None:
+        """The one place a register changes, so a step back finds it."""
+        if self.journal is not None:
+            self.journal.record(Kind.F, number, self.values[number])
+        self.values[number] = value
 
     def raw(self, number: int) -> int:
         """The 64 bits as they lie: for `fmv.x.d`, `fsd` and the views."""
         return self.values[number]
 
     def set_raw(self, number: int, value: int) -> None:
-        self.values[number] = value & 0xFFFFFFFFFFFFFFFF
+        self._set(number, value & 0xFFFFFFFFFFFFFFFF)
 
     def single(self, number: int) -> int:
         """The single precision value of a register: the canonical NaN unless
@@ -77,13 +88,13 @@ class FloatRegisters:
 
     def set_single(self, number: int, bits: int) -> None:
         """A single precision result, boxed so that it can be read back."""
-        self.values[number] = box(bits & 0xFFFFFFFF)
+        self._set(number, box(bits & 0xFFFFFFFF))
 
     def double(self, number: int) -> int:
         return self.values[number]
 
     def set_double(self, number: int, bits: int) -> None:
-        self.values[number] = bits & 0xFFFFFFFFFFFFFFFF
+        self._set(number, bits & 0xFFFFFFFFFFFFFFFF)
 
     def low_word(self, number: int) -> int:
         """The low 32 bits as they lie, which is what `fmv.x.w` and `fsw` take."""

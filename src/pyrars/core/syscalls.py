@@ -30,6 +30,7 @@ import os
 import random
 
 from pyrars.core import traps
+from pyrars.core.history import Kind
 from pyrars.core.regs import as_signed
 from pyrars.core.systemio import Dialog
 from pyrars.core.traps import Trap
@@ -113,7 +114,21 @@ def _result(machine, call) -> None:
 
 
 def _generator(machine, index: int) -> random.Random:
-    return machine.generators.setdefault(index, random.Random())
+    return _keep_stream(machine, index)
+
+
+def _keep_stream(machine, index: int) -> random.Random:
+    """The stream of an index, written down before it moves on so that a step
+    back gives the same number again (DEV-51; RARS does not).
+
+    The stream is made before it is written down, so that taking a step back
+    puts a state back instead of leaving a stream to be made anew - which would
+    draw from a new seed and give another number.
+    """
+    stream = machine.generators.setdefault(index, random.Random())
+    if machine.history is not None:
+        machine.history.record(Kind.RANDOM, index, (stream, stream.getstate()))
+    return stream
 
 
 # ------------------------------------------------------------- what is printed
@@ -232,7 +247,9 @@ def _midi(machine) -> None:
 
 
 def _rand_seed(machine) -> None:
-    machine.generators[machine.x.read(A0)] = random.Random(machine.x.signed(A1))
+    index = machine.x.read(A0)
+    _keep_stream(machine, index)
+    machine.generators[index] = random.Random(machine.x.signed(A1))
 
 
 def _rand_int(machine) -> None:

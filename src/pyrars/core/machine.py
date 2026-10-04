@@ -10,6 +10,7 @@ import random
 from collections.abc import Callable, Sequence
 
 from pyrars.core.csr import ControlRegisters
+from pyrars.core.history import History
 from pyrars.core.memory import Bus, Fetched, Memory
 from pyrars.core.options import Options
 from pyrars.core.regs import FloatRegisters, Registers
@@ -38,6 +39,14 @@ class Machine:
         self.io = io if io is not None else ConsoleIO()  # the world outside
         self.heap = options.config.heap_base  # where the next `sbrk` hands out
         self.generators: dict[int, random.Random] = {}  # the streams of syscall 40
+        # The journal of what a step changed, so that it can be taken back; a
+        # machine built without a depth keeps none, and then a write to a
+        # register or to memory writes nothing down (INV-Z).
+        self.history = (History(options.history_depth, options.debug)
+                        if options.history_depth else None)
+        if self.history is not None:
+            self.x.journal = self.f.journal = self.history
+            self.csr.journal = self.memory.journal = self.history
 
     def load(self, program: AssembledProgram, arguments: Sequence[str] = ()) -> None:
         """Put a program in memory, set the program counter where it starts, and

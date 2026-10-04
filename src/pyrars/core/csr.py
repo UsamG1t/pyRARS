@@ -26,6 +26,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 
 from pyrars.core import traps
+from pyrars.core.history import Kind
 from pyrars.core.options import Options
 from pyrars.isa.registers import CSRS
 
@@ -93,6 +94,7 @@ class ControlRegisters:
         self.options = options
         self.mask = (1 << options.xlen) - 1
         self.clock = _wall_clock if clock is None else clock
+        self.journal = None  # the machine puts `core/history.py` here
         # `time` is not among them: it is read from the clock.
         self.values = {register.name: 0 for register in REGISTERS
                        if not register.host and register.name != "time"}
@@ -120,6 +122,7 @@ class ControlRegisters:
         if register.host:  # a window keeps the rest of its host
             self._store(register, value)
         else:
+            self._keep(name)
             self.values[name] = value & self._limit(register)
 
     def retire(self) -> None:
@@ -134,7 +137,13 @@ class ControlRegisters:
 
     def raise_flags(self, flags: int) -> None:
         """Add the exception flags of an operation to `fcsr`."""
+        self._keep("fcsr")
         self.values["fcsr"] |= flags & ((1 << FFLAGS_BITS) - 1)
+
+    def _keep(self, name: str) -> None:
+        """Write down what a register holds, for a step back."""
+        if self.journal is not None:
+            self.journal.record(Kind.CSR, name, self.values[name])
 
     # ----------------------------------------------------------------- the parts
 
@@ -168,5 +177,6 @@ class ControlRegisters:
             self._store(host, kept | ((value << register.shift) & window))
             return
         writable = self._limit(register) if register.writable is None else register.writable
+        self._keep(register.name)
         self.values[register.name] = ((self.values[register.name] & ~writable)
                                       | (value & writable))
