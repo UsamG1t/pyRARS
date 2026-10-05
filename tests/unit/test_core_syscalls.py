@@ -194,9 +194,9 @@ def test_a_wide_number_is_read_by_a_64_bit_machine():
 
 
 @pytest.mark.parametrize("service, text, message", [
-    (5, "abc\n", "invalid integer input (syscall 5)"),
-    (6, "abc\n", "invalid float input (syscall 6)"),
-    (7, "abc\n", "invalid double input (syscall 7)"),
+    (5, "abc\n", "Invalid integer input (syscall 5)"),
+    (6, "abc\n", "Invalid float input (syscall 6)"),
+    (7, "abc\n", "Invalid double input (syscall 7)"),
 ])
 def test_input_that_is_no_number(service, text, message):
     """The messages of RARS, word for word."""
@@ -222,7 +222,7 @@ def test_a_character_is_read_and_the_end_of_the_input_is_refused():
     m = machine(12, io=FakeIO(reading=""))
     with pytest.raises(Trap) as raised:
         call(m)
-    assert raised.value.message == "invalid char input (syscall 12)"
+    assert raised.value.message == "Invalid char input (syscall 12)"
 
 
 @pytest.mark.parametrize("reading, room, expected", [
@@ -311,7 +311,7 @@ def test_an_unknown_service():
     m = machine(777)
     with pytest.raises(Trap) as raised:
         call(m)
-    assert raised.value.message == "invalid or unimplemented syscall service: 777"
+    assert raised.value.message == "Invalid or unimplemented syscall service 777"
 
 
 # ---------------------------------------------------------- the random numbers

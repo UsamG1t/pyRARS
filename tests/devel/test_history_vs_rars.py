@@ -35,13 +35,13 @@ def ours(source: str, tmp_path, steps: int, back: int = 0, forward: int = 0,
          xlen: int = 32) -> tuple[dict[int, int], list[int]]:
     """Our machine after `steps` steps, `back` steps back and `forward` again."""
     program = compiled(source, tmp_path, xlen)
-    outcome = driver.run(program, Options(xlen=xlen), steps=steps)
+    outcome = driver.run(program, Options(xlen=xlen, history_depth=2000), steps=steps)
     assert outcome.reason == "steps", outcome.reason
     machine = outcome.machine
     for _ in range(back):
-        assert machine.history.back(machine) is True
+        assert outcome.simulator.back_step() is True
     for _ in range(forward):
-        driver.step(machine)
+        outcome.simulator.step()
     # The command line of RARS prints the low 32 bits of a register, so that is
     # what is compared; a wide result of RV64 is compared through memory.
     return ({number: machine.x.read(number) & 0xFFFFFFFF for number in range(1, 32)},

@@ -19,10 +19,11 @@ main: li t0, 5
 """
 
 
-def run(*arguments):
-    """(exit code, standard output, error output) of a command."""
+def run(*arguments, given=""):
+    """(exit code, standard output, error output) of a command; `given` is what the
+    standard input holds for a program that reads."""
     out, errors = io.StringIO(), io.StringIO()
-    code = main(list(arguments), out=out, errors=errors)
+    code = main(list(arguments), out=out, errors=errors, reader=io.StringIO(given))
     return code, out.getvalue(), errors.getvalue()
 
 
@@ -175,3 +176,175 @@ def test_pseudo_instructions_can_be_forbidden(tmp_path):
 def test_no_command_is_an_error():
     with pytest.raises(SystemExit):
         main([])
+
+
+# ------------------------------------------------------------------------ run
+
+EXIT = """\
+.text
+main:   li t0, -5
+        li t1, 0x41424344
+        la t2, n
+        sw t1, 0(t2)
+        li a7, 93
+        li a0, 7
+        ecall
+"""
+DATA_PART = ".data\nn:    .word 0\n"
+HELLO = """\
+.data
+msg:    .asciz "hi there\\n"
+.text
+main:   la a0, msg
+        li a7, 4
+        ecall
+        li a7, 10
+        ecall
+"""
+
+
+def test_a_program_that_exits_gives_its_own_code(tmp_path):
+    code, out, errors = run("run", source(tmp_path, DATA_PART + EXIT))
+    assert code == 7
+    assert errors == "\nProgram terminated by calling exit\n"
+    assert out == ""
+
+
+def test_what_a_program_writes_goes_to_the_standard_output(tmp_path):
+    code, out, errors = run("run", source(tmp_path, HELLO))
+    assert (code, out) == (0, "hi there\n")
+    assert "Program terminated by calling exit" in errors
+
+
+def test_a_program_reads_the_standard_input(tmp_path):
+    source_text = """\
+.text
+main:   li a7, 5
+        ecall
+        add a1, a0, a0
+        li a7, 1
+        mv a0, a1
+        ecall
+        li a7, 10
+        ecall
+"""
+    assert run("run", source(tmp_path, source_text), given="21\n")[1] == "42"
+
+
+def test_the_registers_and_memory_a_run_was_asked_for(tmp_path):
+    code, out, _ = run("run", "-r", "t0,t1", "--memory", "0x10010000-0x10010000",
+                       "-c", source(tmp_path, DATA_PART + EXIT))
+    assert code == 7
+    assert out == ("instructions\t8\n"
+                   "t0\t0xfffffffb\n"
+                   "t1\t0x41424344\n"
+                   "Mem[0x10010000]\t0x41424344\n")
+
+
+def test_a_range_of_memory_starts_at_the_word_it_lies_in(tmp_path):
+    code, out, _ = run("run", "--memory", "0x10010002-0x10010005",
+                       source(tmp_path, DATA_PART + EXIT))
+    assert out == "Mem[0x10010000]\t0x41424344\t0x00000000\n"
+
+
+def test_the_formats_of_a_printed_value(tmp_path):
+    path = source(tmp_path, DATA_PART + EXIT)
+    assert run("run", "-r", "t0", "-f", "dec", path)[1] == "t0\t-5\n"
+    assert run("run", "-r", "t1", "-f", "ascii", path)[1] == "t1\t  A  B  C  D\n"
+    assert run("run", "-r", "t0", "-f", "ascii", path)[1] == "t0\t  .  .  .  .\n"
+
+
+def test_a_register_of_a_64_bit_machine_shows_every_digit(tmp_path):
+    """RARS prints the low eight digits of any register; ours prints the register
+    (DEV-47)."""
+    text = ".text\nmain:   li t0, 1\n        slli t0, t0, 40\n        li a7, 10\n        ecall\n"
+    assert run("run", "-x", "64", "-r", "t0", source(tmp_path, text))[1] == \
+        "t0\t0x0000010000000000\n"
+
+
+def test_the_float_and_control_registers_can_be_printed(tmp_path):
+    text = """\
+.text
+main:   li t0, 0x3f800000
+        fmv.w.x f1, t0
+        fmv.w.x f3, x0
+        fdiv.s f2, f1, f3
+        li a7, 10
+        ecall
+"""
+    code, out, _ = run("run", "-r", "f1,fa0,fflags", source(tmp_path, text))
+    assert out == ("f1\t0xffffffff3f800000\n"
+                   "fa0\t0x0000000000000000\n"  # an ABI name does as well
+                   "fflags\t0x00000008\n")
+
+
+def test_a_program_that_runs_off_its_text(tmp_path):
+    code, _, errors = run("run", source(tmp_path, ".text\nmain:   li t0, 1\n"))
+    assert (code, errors) == (0, "\nProgram terminated by dropping off the bottom.\n")
+
+
+def test_a_program_that_is_stopped_by_a_trap(tmp_path):
+    path = source(tmp_path, ".text\nmain:   li t0, 1\n        lw t1, 1(x0)\n")
+    code, out, errors = run("run", "-r", "t0", path)
+    assert code == 1
+    assert errors == (f"\nError in {path} line 3: Runtime exception at 0x00400004: "
+                      "Load address not aligned to word boundary 0x00000001\n"
+                      "\nSimulation terminated due to errors.\n")
+    assert out == "t0\t0x00000001\n"  # what it was asked for is still printed
+
+
+def test_the_step_limit(tmp_path):
+    code, out, errors = run("run", "--steps", "2", "-r", "t0", "-c",
+                            source(tmp_path, DATA_PART + EXIT))
+    assert (code, errors) == (0, "\nProgram terminated when maximum step limit 2 reached.\n")
+    assert out == "instructions\t2\nt0\t0xfffffffb\n"
+
+
+def test_a_breakpoint_of_the_command_line(tmp_path):
+    code, out, errors = run("run", "--break", "0x00400008", "-c",
+                            source(tmp_path, DATA_PART + EXIT))
+    assert (code, errors) == (0, "\nProgram stopped at a breakpoint 0x00400008\n")
+    assert out == "instructions\t2\n"
+
+
+def test_a_program_reads_its_own_arguments(tmp_path):
+    text = """\
+.text
+main:   li a7, 1
+        ecall
+        li a7, 10
+        ecall
+"""
+    assert run("run", source(tmp_path, text), "--args", "one", "two")[1] == "2"
+
+
+def test_a_name_nobody_has_is_refused_before_the_run(tmp_path):
+    code, out, errors = run("run", "-r", "t0,x99", source(tmp_path, HELLO))
+    assert (code, out) == (1, "")  # the program did not run at all
+    assert errors == '"x99": no register of that name\n'
+
+
+def test_a_range_of_memory_that_makes_no_sense(tmp_path):
+    path = source(tmp_path, HELLO)
+    assert run("run", "--memory", "0x10010000", path)[0] == 1
+    assert run("run", "--memory", "0x10010010-0x10010000", path)[2] == \
+        '"0x10010010-0x10010000": the first address must be the lower one\n'
+
+
+def test_a_program_that_does_not_assemble_is_not_run(tmp_path):
+    code, out, errors = run("run", source(tmp_path, ".text\nmain:   nonsense t0\n"))
+    assert (code, out) == (1, "")
+    assert "is not a recognized operator" in errors
+
+
+def test_the_self_modifying_option_reaches_the_machine(tmp_path):
+    text = """\
+.text
+main:   la t0, main
+        lw t1, 0(t0)
+        li a7, 10
+        ecall
+"""
+    path = source(tmp_path, text)
+    assert run("run", path)[0] == 1  # the text segment is closed
+    assert run("run", "--self-modifying", path)[0] == 0

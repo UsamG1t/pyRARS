@@ -9,7 +9,8 @@ Four kinds, all verified by running RARS (2026-09-30):
     its bits 5..7, and `cycleh`, `timeh`, `instreth` are the upper half of the
     counters. A window is written through its host and takes the mask of it;
   - read-only: the three counters and their halves. A program that tries to
-    write one, in any of the six forms of the instruction, is refused; a form
+    write one, in any of the six forms of the instruction, is refused - and the
+    message names the register, where RARS says only "CSR" (DEV-54); a form
     whose source is zero is a plain read and passes.
 
 `cycle` and `instret` count one per instruction, as in RARS, which has no model
@@ -110,7 +111,8 @@ class ControlRegisters:
         register = self._register(number)
         if register.read_only:
             raise traps.Trap(traps.ILLEGAL_INSTRUCTION, number,
-                             "Attempt to write to read-only CSR")
+                             "Cannot write to the read-only control register "
+                             f"{register.name}")
         self._store(register, value)
 
     # -------------------------------------------------------- what the machine does
@@ -151,7 +153,7 @@ class ControlRegisters:
         register = BY_NUMBER.get(number)
         if register is None:
             raise traps.Trap(traps.ILLEGAL_INSTRUCTION, number,
-                             "Attempt to access unavailable CSR")
+                             f"No such control register 0x{number:03x}")
         return register
 
     def _limit(self, register: Register) -> int:

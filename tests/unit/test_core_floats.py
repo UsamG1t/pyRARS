@@ -153,10 +153,10 @@ def test_the_dynamic_mode_is_read_from_frm():
 
 
 @pytest.mark.parametrize("field, frm, text", [
-    (5, 0, "Invalid rounding mode. RM = 5 and frm = 0"),
-    (6, 0, "Invalid rounding mode. RM = 6 and frm = 0"),
-    (DYN, 5, "Invalid rounding mode. RM = 7 and frm = 5"),
-    (DYN, 7, "Invalid rounding mode. RM = 7 and frm = 7"),
+    (5, 0, "Invalid rounding mode 5"),
+    (6, 0, "Invalid rounding mode 6"),
+    (DYN, 5, "Invalid rounding mode 5 in frm"),
+    (DYN, 7, "Invalid rounding mode 7 in frm"),
 ])
 def test_a_reserved_rounding_mode_is_refused(field, frm, text):
     """The message of RARS, word for word (verified)."""

@@ -141,20 +141,30 @@ def test_memory_that_was_never_written_and_the_far_areas(rars, tmp_path):
     assert ours == values
 
 
-@pytest.mark.parametrize("body, ours", [
+@pytest.mark.parametrize("body, action, theirs, mine", [
     ("        li t1, 0x00400000\n        lw a0, 0(t1)\n",
-     lambda m: m.read(TEXT, 4)),
+     lambda m: m.read(TEXT, 4),
+     "Cannot read directly from text segment!0x00400000",
+     "Cannot read directly from text segment 0x00400000"),
     ("        li t1, 0x00400000\n        sw x0, 0(t1)\n",
-     lambda m: m.write(TEXT, 4, 0)),
+     lambda m: m.write(TEXT, 4, 0),
+     "Cannot write directly to text segment!0x00400000",
+     "Cannot write directly to text segment 0x00400000"),
     ("        li t1, 0x90000000\n        lw a0, 0(t1)\n",
-     lambda m: m.read(0x90000000, 4)),
-    ("        lw a0, 1(x0)\n", lambda m: m.read(1, 4)),
+     lambda m: m.read(0x90000000, 4),
+     "address out of range 0x90000000",
+     "Address out of range 0x90000000"),
+    ("        lw a0, 1(x0)\n", lambda m: m.read(1, 4),
+     "Load address not aligned to word boundary 0x00000001",
+     "Load address not aligned to word boundary 0x00000001"),
 ])
-def test_the_messages_of_a_refused_access(rars, tmp_path, body, ours):
-    """The texts of RARS, kept word for word (D10)."""
+def test_the_messages_of_a_refused_access(rars, tmp_path, body, action, theirs, mine):
+    """The words of RARS, in the one shape every message of the machine has: a
+    capital letter, no glue before the address (DEV-54). Both machines refuse the
+    same accesses, which is what matters; the texts are stated on both sides."""
     values, message = outcome(rars, tmp_path, body)
-    assert message, "RARS should refuse this access"
-    assert fault_of(lambda: ours(memory())) == message
+    assert message == theirs
+    assert fault_of(lambda: action(memory())) == mine
 
 
 def test_self_modifying_code(rars, tmp_path):
@@ -187,7 +197,7 @@ def test_rars_reaches_less_than_its_configuration_says(rars, tmp_path, address):
     outside the 4 MiB tables RARS keeps, so RARS refuses them and we do not."""
     body = f"        li t1, {address:#010x}\n        li t2, 3\n        sw t2, 0(t1)\n"
     _, message = outcome(rars, tmp_path, body)
-    assert message == f"address out of range 0x{address:08x}"
+    assert message == f"address out of range 0x{address:08x}"  # DEV-54: ours is capital
 
     m = memory()
     m.write(address, 4, 3)
@@ -201,7 +211,7 @@ def test_rars_reaches_less_of_the_text_segment_too(rars, tmp_path):  # DEV-43
     _, message = outcome(rars, tmp_path, body)
     assert message == "address out of range 0x00800000"
     assert fault_of(lambda: memory().read(0x00800000, 4)) == (
-        "Cannot read directly from text segment!0x00800000")
+        "Cannot read directly from text segment 0x00800000")
 
 
 def test_rars_lets_an_eight_byte_access_lie_askew(rars, tmp_path):  # DEV-44
@@ -258,11 +268,14 @@ def test_the_message_of_a_misaligned_jump(rars, tmp_path):  # DEV-45
 
 
 def test_the_message_of_a_jump_outside_the_text(rars, tmp_path):
+    """RARS says `Instruction load access error` and keeps the address to itself,
+    though it is the one thing a reader needs; ours names it (DEV-54)."""
     path = tmp_path / "p.s"
     path.write_text(HEAD + "        la t1, val\n        jalr x0, 0(t1)\n" + TAIL)
     done = rars.run([path])
     assert "Instruction load access error" in done.stdout
-    assert fault_of(lambda: memory().fetch(DATA)) == "Instruction load access error"
+    assert fault_of(lambda: memory().fetch(DATA)) == (
+        f"Cannot fetch an instruction from 0x{DATA:08x}")
 
 
 def test_a_program_that_runs_off_its_text(rars, tmp_path):

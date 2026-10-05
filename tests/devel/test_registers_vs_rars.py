@@ -182,24 +182,33 @@ main:   li t0, 0xffffffff
     assert ours == theirs
 
 
-@pytest.mark.parametrize("body, ours", [
+@pytest.mark.parametrize("body, action, theirs, mine", [
     ("        li t0, 5\n        csrrw x0, cycle, t0\n",
-     lambda c: c.write(CSRS["cycle"], 5)),
+     lambda c: c.write(CSRS["cycle"], 5),
+     "Attempt to write to read-only CSR",
+     "Cannot write to the read-only control register cycle"),
     ("        li t0, 1\n        csrrs t1, instret, t0\n",
-     lambda c: c.write(CSRS["instret"], 1)),
-    ("        csrrsi t1, cycleh, 1\n", lambda c: c.write(CSRS["cycleh"], 1)),
-    ("        csrrs t1, 0x123, x0\n", lambda c: c.read(0x123)),
+     lambda c: c.write(CSRS["instret"], 1),
+     "Attempt to write to read-only CSR",
+     "Cannot write to the read-only control register instret"),
+    ("        csrrsi t1, cycleh, 1\n", lambda c: c.write(CSRS["cycleh"], 1),
+     "Attempt to write to read-only CSR",
+     "Cannot write to the read-only control register cycleh"),
+    ("        csrrs t1, 0x123, x0\n", lambda c: c.read(0x123),
+     "Attempt to access unavailable CSR", "No such control register 0x123"),
 ])
-def test_the_messages_of_a_refused_register(rars, tmp_path, body, ours):
+def test_the_messages_of_a_refused_register(rars, tmp_path, body, action, theirs, mine):
+    """Both machines refuse the same registers; our message says WHICH one, where
+    RARS says only "CSR" (DEV-54)."""
     path = tmp_path / "p.s"
     path.write_text(".text\nmain:\n" + body + EXIT)
     done = rars.run([path])
-    theirs = ""
+    reported = ""
     for line in done.stdout.splitlines():
         if "Runtime exception at " in line:
-            theirs = line.split(": ", 2)[-1]
-    assert theirs, done.stdout
-    assert message_of(lambda: ours(ControlRegisters())) == theirs
+            reported = line.split(": ", 2)[-1]
+    assert reported == theirs, done.stdout
+    assert message_of(lambda: action(ControlRegisters())) == mine
 
 
 def test_reading_a_counter_without_writing_it_is_allowed(rars, tmp_path):

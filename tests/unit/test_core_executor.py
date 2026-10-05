@@ -299,7 +299,7 @@ def test_a_read_only_register_can_be_read_but_not_written():
     assert m.x.read(C) == 0
     with pytest.raises(Trap) as raised:
         step(m)
-    assert raised.value.message == "Attempt to write to read-only CSR"
+    assert raised.value.message == "Cannot write to the read-only control register cycle"
 
 
 def test_a_breakpoint_is_raised_for_the_simulator():
@@ -315,7 +315,7 @@ def test_a_call_of_the_environment_reaches_the_services():
     m = machine(word("ecall"), x17=777)
     with pytest.raises(Trap) as raised:
         step(m)
-    assert raised.value.message == "invalid or unimplemented syscall service: 777"
+    assert raised.value.message == "Invalid or unimplemented syscall service 777"
 
 
 def test_a_fence_does_nothing_but_move_on():
@@ -329,7 +329,7 @@ def test_a_word_that_encodes_no_instruction():
     with pytest.raises(Trap) as raised:
         step(m)
     assert raised.value.cause == ILLEGAL_INSTRUCTION
-    assert raised.value.message == "undefined instruction (0x11223344)"
+    assert raised.value.message == "Undefined instruction 0x11223344"
     assert raised.value.value == 0x11223344
 
 

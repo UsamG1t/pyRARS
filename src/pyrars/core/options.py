@@ -14,8 +14,10 @@ another width or another configuration instead of giving wrong results.
 Where the program starts is NOT here: the assembler already decided it and
 `AssembledProgram.entry` carries it.
 
-`history_depth` says how many steps can be taken back; zero means that nothing
-is written down at all, which is what the command line runs with. `debug` says
+`history_depth` says how many steps can be taken back; zero, which is the
+default, means that nothing is written down at all - a plain run has nobody to
+look at the journal, and a debugging session asks for a depth of its own (2000 is
+the depth of RARS). `debug` says
 that the program runs under a debugger, and then a step back also takes the
 world outside back: what was read is handed out again, the files stand where
 they stood. The world writes its record down either way; the flag only decides
@@ -32,5 +34,5 @@ class Options:
     xlen: int = 32  # width of the registers, 32 or 64
     config: MemoryConfig = DEFAULT  # where the segments live
     self_modifying: bool = False  # may a program read and write its own text?
-    history_depth: int = 2000  # steps that can be taken back; 0 keeps no journal
+    history_depth: int = 0  # steps that can be taken back; 0 keeps no journal
     debug: bool = False  # under a debugger: a step back takes the world back too

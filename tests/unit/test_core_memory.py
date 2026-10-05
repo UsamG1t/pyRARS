@@ -99,7 +99,7 @@ def test_an_address_of_no_area_is_out_of_range(address):
         with pytest.raises(Trap) as raised:
             m.read(address, size)
         assert raised.value.cause == traps.LOAD_ACCESS_FAULT
-        assert raised.value.message == f"address out of range 0x{address:08x}"
+        assert raised.value.message == f"Address out of range 0x{address:08x}"
     with pytest.raises(Trap) as raised:
         m.write(address, 4, 0)
     assert raised.value.cause == traps.STORE_ACCESS_FAULT
@@ -158,11 +158,11 @@ def test_a_program_cannot_touch_its_own_text():
     with pytest.raises(Trap) as raised:
         m.read(TEXT, 4)
     assert raised.value.cause == traps.LOAD_ACCESS_FAULT
-    assert raised.value.message == f"Cannot read directly from text segment!0x{TEXT:08x}"
+    assert raised.value.message == f"Cannot read directly from text segment 0x{TEXT:08x}"
     with pytest.raises(Trap) as raised:
         m.write(TEXT, 4, 0)
     assert raised.value.cause == traps.STORE_ACCESS_FAULT
-    assert raised.value.message == f"Cannot write directly to text segment!0x{TEXT:08x}"
+    assert raised.value.message == f"Cannot write directly to text segment 0x{TEXT:08x}"
 
 
 def test_with_self_modifying_code_the_text_is_ordinary_memory():
@@ -236,7 +236,7 @@ def test_a_fetch_outside_the_text_is_refused():
     with pytest.raises(Trap) as raised:
         m.fetch(DATA)
     assert raised.value.cause == traps.INSTRUCTION_ACCESS_FAULT
-    assert raised.value.message == "Instruction load access error"
+    assert raised.value.message == f"Cannot fetch an instruction from 0x{DATA:08x}"
 
 
 def test_with_self_modifying_code_a_fetch_outside_the_text_is_allowed():

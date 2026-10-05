@@ -79,13 +79,16 @@ def test_the_flags_of_an_operation_are_added_to_fcsr():
     assert c.read(FFLAGS) == 0x11 and c.rounding_mode() == 2
 
 
-@pytest.mark.parametrize("number", [CYCLE, TIME, INSTRET, CYCLEH, TIMEH, INSTRETH])
-def test_a_counter_refuses_every_write(number):
+@pytest.mark.parametrize("number, name", [
+    (CYCLE, "cycle"), (TIME, "time"), (INSTRET, "instret"),
+    (CYCLEH, "cycleh"), (TIMEH, "timeh"), (INSTRETH, "instreth")])
+def test_a_counter_refuses_every_write(number, name):
+    """The message names the register, where RARS says only "CSR" (DEV-54)."""
     c = registers()
     with pytest.raises(Trap) as raised:
         c.write(number, 1)
     assert raised.value.cause == ILLEGAL_INSTRUCTION
-    assert raised.value.message == "Attempt to write to read-only CSR"
+    assert raised.value.message == f"Cannot write to the read-only control register {name}"
     assert raised.value.value == number
 
 
@@ -94,7 +97,7 @@ def test_a_register_that_does_not_exist():
     for number in (0x123, 0x300, 0xFFF):
         with pytest.raises(Trap) as raised:
             c.read(number)
-        assert raised.value.message == "Attempt to access unavailable CSR"
+        assert raised.value.message == f"No such control register 0x{number:03x}"
         with pytest.raises(Trap):
             c.write(number, 0)
 

@@ -21,9 +21,10 @@ Two decisions shape them (D20, user decision 2026-10-03):
 The dialogs of a window system become the console in a text session (user decision
 2026-10-03): a message is printed, a question is printed and its answer read.
 
-The message of a service that cannot do what it was asked is the message of RARS,
-word for word (D10): `invalid integer input (syscall 5)` and its relatives, and
-`invalid or unimplemented syscall service: 777` for a number nobody serves.
+The message of a service that cannot do what it was asked keeps the words of RARS
+(D10) in the shape every message of the machine has (DEV-54): `Invalid integer
+input (syscall 5)` and its relatives, and `Invalid or unimplemented syscall
+service 777` for a number nobody serves.
 """
 
 import os
@@ -57,7 +58,7 @@ def call(machine) -> None:
     service = SERVICES.get(number)
     if service is None:
         raise Trap(traps.ENVIRONMENT_CALL, 0,
-                   f"invalid or unimplemented syscall service: {number}")
+                   f"Invalid or unimplemented syscall service {number}")
     service(machine)
 
 
@@ -92,7 +93,7 @@ def _number(machine, text: str, service: int, kind: str) -> int:
         return int(text.strip())
     except ValueError:
         raise Trap(traps.ENVIRONMENT_CALL, 0,
-                   f"invalid {kind} input (syscall {service})") from None
+                   f"Invalid {kind} input (syscall {service})") from None
 
 
 def _real(machine, text: str, service: int, kind: str, fmt) -> int:
@@ -100,7 +101,7 @@ def _real(machine, text: str, service: int, kind: str, fmt) -> int:
         return from_text(text.strip(), fmt)[0]
     except ValueError:
         raise Trap(traps.ENVIRONMENT_CALL, 0,
-                   f"invalid {kind} input (syscall {service})") from None
+                   f"Invalid {kind} input (syscall {service})") from None
 
 
 def _result(machine, call) -> None:
@@ -184,7 +185,7 @@ def _read_double(machine) -> None:
 def _read_char(machine) -> None:
     letter = machine.io.read(0, 1)
     if not letter:
-        raise Trap(traps.ENVIRONMENT_CALL, 0, "invalid char input (syscall 12)")
+        raise Trap(traps.ENVIRONMENT_CALL, 0, "Invalid char input (syscall 12)")
     machine.x.write(A0, letter[0])
 
 

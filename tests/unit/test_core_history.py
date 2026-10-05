@@ -36,7 +36,9 @@ def word(mnemonic: str, xlen: int = 32, **fields: int) -> int:
 
 def machine(*words: int, xlen: int = 32, debug: bool = False, depth: int = 2000,
             io_=None, **values: int) -> Machine:
-    """A machine with a journal, holding the words as its program."""
+    """A machine with a journal, holding the words as its program. A journal has to
+    be asked for: `Options.history_depth` is zero by default, because a plain run
+    has nobody to look at it (user decision 2026-10-05)."""
     m = Machine(Options(xlen=xlen, history_depth=depth, debug=debug), io=io_)
     for index, value in enumerate(words):
         m.memory.poke(TEXT + 4 * index, 4, value)
@@ -192,7 +194,7 @@ def test_a_write_into_the_text_leaves_the_text_as_empty_as_it_was():
     Taking the write back makes the word hold nothing again, so the machine stops
     there instead of reading an illegal instruction out of zeroes."""
     place = TEXT + 0x40
-    m = Machine(Options(self_modifying=True))
+    m = Machine(Options(self_modifying=True, history_depth=2000))
     m.memory.poke(TEXT, 4, word("sw", rs1=5, rs2=6, imm=0))
     m.x.write(5, place)
     m.x.write(6, NOP)
@@ -205,7 +207,7 @@ def test_a_write_into_the_text_leaves_the_text_as_empty_as_it_was():
 
 def test_a_rewritten_instruction_is_read_anew_after_a_step_back():
     place = TEXT + 0x40
-    m = Machine(Options(self_modifying=True))
+    m = Machine(Options(self_modifying=True, history_depth=2000))
     m.memory.poke(TEXT, 4, word("sw", rs1=5, rs2=6, imm=0))
     m.memory.poke(place, 4, NOP)
     m.x.write(5, place)
@@ -230,7 +232,7 @@ def test_a_write_to_a_device_is_the_device_s_own_to_undo():
             self.written.append((address, value))
 
     bus = Bus()
-    m = Machine(Options(), bus=bus)
+    m = Machine(Options(history_depth=2000), bus=bus)
     m.history.begin(m)
     m.memory.write(DEFAULT.mmio_base, 4, 7)
     assert m.history.steps[-1].entries == []

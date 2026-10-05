@@ -110,7 +110,7 @@ def execute(machine: Machine, fetched: Fetched) -> None:
     """Carry out one instruction. Raises Trap when it cannot be carried out."""
     if fetched.instr is None:
         raise Trap(traps.ILLEGAL_INSTRUCTION, fetched.word,
-                   f"undefined instruction (0x{fetched.word:08x})")
+                   f"Undefined instruction 0x{fetched.word:08x}")
     mnemonic = fetched.instr.instr.mnemonic
     machine.x.pc = (fetched.address + 4) & machine.mask
     _carry_out(machine, mnemonic, fetched.instr.operands, fetched.address)

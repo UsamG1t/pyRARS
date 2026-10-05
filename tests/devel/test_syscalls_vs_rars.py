@@ -203,22 +203,25 @@ def test_the_code_a_program_exits_with(rars, tmp_path):
     assert ours(source, tmp_path) == theirs(rars, tmp_path)
 
 
-@pytest.mark.parametrize("source, text", [
-    (".text\nmain:   li a7, 5\n        ecall\n", "invalid integer input (syscall 5)"),
+@pytest.mark.parametrize("source, theirs, mine", [
+    (".text\nmain:   li a7, 5\n        ecall\n",
+     "invalid integer input (syscall 5)", "Invalid integer input (syscall 5)"),
     (".text\nmain:   li a7, 777\n        ecall\n",
-     "invalid or unimplemented syscall service: 777"),
+     "invalid or unimplemented syscall service: 777",
+     "Invalid or unimplemented syscall service 777"),
 ])
-def test_a_service_that_cannot_do_what_it_was_asked(rars, tmp_path, source, text):
-    """The message of RARS, word for word, and both machines stop there."""
+def test_a_service_that_cannot_do_what_it_was_asked(rars, tmp_path, source, theirs, mine):
+    """The words of RARS in the one shape of every message of the machine (DEV-54);
+    both machines stop there."""
     path = tmp_path / "p.s"
     path.write_text(source + EXIT)
     program = assemble([str(path)], AsmOptions())
     outcome = driver.run(program, Options(), io=ConsoleIO(
         out=streams.StringIO(), reader=streams.StringIO("abc\n" if "5" in source else "")))
-    assert outcome.reason == text
+    assert outcome.reason == mine
 
     done = rars.run([path], stdin="abc\n")
-    assert any(text in line for line in done.stdout.splitlines()), done.stdout
+    assert any(theirs in line for line in done.stdout.splitlines()), done.stdout
 
 
 def test_the_working_directory_is_the_same_for_both(rars, tmp_path):

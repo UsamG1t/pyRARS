@@ -21,7 +21,9 @@ Which addresses a program may touch follows the memory configuration:
 Every access must be aligned to its own width. Where RARS differs - it reaches
 only four windows of 4 MiB, checks a load of eight bytes against four and a
 store of eight bytes not at all, and words its alignment messages in four
-different ways - see DEV-43, DEV-44 and DEV-45.
+different ways - see DEV-43, DEV-44 and DEV-45. The messages follow the one
+rule of DEV-54: a capital letter, no full stop, and the address last after a
+space, so a fetch that lands nowhere says which address it was.
 
 Sources: verified behaviour of RARS in `rars-behavior.md` (R-MEM-CFG, R-MEM-SMC,
 R-FP has none of this); cause codes from the ISA manual, see `traps.py`.
@@ -198,7 +200,7 @@ class Memory:
                 return cached
         elif not (self.options.self_modifying and area is Area.DATA):
             raise Trap(traps.INSTRUCTION_ACCESS_FAULT, address,
-                        "Instruction load access error")
+                        f"Cannot fetch an instruction from 0x{address:08x}")
         word = int.from_bytes(self._get(address, 4), "little")
         fetched = Fetched(address, word, decode(word, self.options.xlen))
         if area is Area.TEXT:
@@ -289,10 +291,10 @@ class Memory:
         if area is Area.TEXT and not self.options.self_modifying:
             verb = "read directly from" if reading else "write directly to"
             raise Trap(traps.LOAD_ACCESS_FAULT if reading else traps.STORE_ACCESS_FAULT,
-                        address, f"Cannot {verb} text segment!0x{address:08x}")
+                        address, f"Cannot {verb} text segment 0x{address:08x}")
         if area is Area.NONE:
             raise Trap(traps.LOAD_ACCESS_FAULT if reading else traps.STORE_ACCESS_FAULT,
-                        address, f"address out of range 0x{address:08x}")
+                        address, f"Address out of range 0x{address:08x}")
         return area
 
     def _text_changed(self, address: int, size: int) -> None:

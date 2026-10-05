@@ -12,8 +12,10 @@ canonical NaN. That holds for the sign injection as well, and for `fsw` and
 `fmv.x.w` it does not: those take the low word as it lies (all verified in RARS).
 
 The rounding mode is the `rm` field of the instruction, or `frm` where the field
-says "dynamic". A reserved mode is refused with the message of RARS: "Invalid
-rounding mode. RM = 7 and frm = 5".
+says "dynamic". A reserved mode is refused, naming the number that was actually
+asked for: `Invalid rounding mode 7`, or `Invalid rounding mode 5 in frm` when the
+field said dynamic. RARS prints both numbers and a full stop in the middle of its
+sentence (DEV-54).
 
 Sources: RISC-V ISA manual v20260120, chapters F and D; the verified behaviour of
 RARS in R-FP and R-REG.
@@ -107,8 +109,11 @@ def _mode(machine, operands: dict[str, int]) -> int:
     dynamic = machine.csr.rounding_mode()
     mode = dynamic if asked == DYN else asked
     if mode not in MODES:
+        # The number that matters is the one that was asked for: the field of
+        # the instruction, or `frm` when the field says dynamic (DEV-54).
         raise Trap(traps.ILLEGAL_INSTRUCTION, 0,
-                   f"Invalid rounding mode. RM = {asked} and frm = {dynamic}")
+                   f"Invalid rounding mode {dynamic} in frm" if asked == DYN
+                   else f"Invalid rounding mode {asked}")
     return mode
 
 
