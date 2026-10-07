@@ -6,10 +6,11 @@ files, and the numeric labels by their position), expands the
 pseudo-instructions, encodes the instructions and writes the data values.
 
 A value that does not fit its data directive is truncated with the warning of
-RARS. Two instructions at the same address are reported like RARS does.
+RARS. Two instructions at the same address are reported like RARS does. The
+values of `.float` and `.double` are converted by `pyrars.softfloat`, so that a
+literal is rounded once and not twice (DEV-36).
 """
 
-import struct
 from collections.abc import Sequence
 from dataclasses import dataclass, replace
 
@@ -22,8 +23,12 @@ from pyrars.asm.pass1 import DataValue, Pass1, Placed
 from pyrars.isa.codec import encode
 from pyrars.isa.program import DataItem, Diagnostic, SourceLoc, TextEntry
 from pyrars.isa.spec import Instr
+from pyrars.softfloat.convert import from_integer
+from pyrars.softfloat.formats import BINARY32, BINARY64
+from pyrars.softfloat.rounding import OF, RNE
+from pyrars.softfloat.text import from_text
 
-_FLOAT_FORMATS = {4: "f", 8: "d"}
+_REAL_FORMATS = {4: BINARY32, 8: BINARY64}
 
 
 @dataclass(frozen=True)
@@ -175,11 +180,25 @@ class _Pass2:
                 self.error(replace(value.loc, column=e.column), e.message)
                 return
         if value.float_value:
-            data = _float_bytes(float(number), value.size)
+            data = self.real_bytes(number, value)
         else:
             data = self.integer_bytes(int(number), value)
         for offset, byte in enumerate(data):
             self.data[value.address + offset] = byte
+
+    def real_bytes(self, number: int | float, value: DataValue) -> bytes:
+        """The bytes of one `.float` or `.double` value. A real literal is
+        converted from its own text, with a single correct rounding (DEV-36); a
+        value that came out of an integer expression is converted from that
+        integer. A value too large for the format is refused with the message of
+        RARS (user decision 2026-09-30: RARS refuses it for `.float` only,
+        because it reads every literal as a 64-bit value first)."""
+        fmt = _REAL_FORMATS[value.size]
+        bits, flags = (from_text(value.operand.text, fmt) if isinstance(number, float)
+                       else from_integer(int(number), fmt, RNE))
+        if flags & OF:
+            self.error(value.loc, f'"{value.operand.text}" is an out-of-range value')
+        return bits.to_bytes(value.size, "little")
 
     def integer_bytes(self, number: int, value: DataValue) -> bytes:
         """The value in `size` bytes; one that does not fit is truncated (RARS)."""
@@ -200,5 +219,4 @@ class _Pass2:
                          frozenset(self.globals), tuple(self.diagnostics))
 
 
-def _float_bytes(number: float, size: int) -> bytes:
-    return struct.pack("<" + _FLOAT_FORMATS[size], number)
+

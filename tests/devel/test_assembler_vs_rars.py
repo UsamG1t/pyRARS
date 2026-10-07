@@ -149,3 +149,60 @@ def test_what_rars_cannot_assemble(rars, tmp_path):
     theirs = rars.assemble([paths[0]])
     assert [m.text for m in theirs.messages][:1] == [
         "RARS does not recognize the .insn directive.  Ignored."]
+
+
+# Literals whose value both assemblers must agree on, RARS through a Java
+# double and a cast, we through pyrars.softfloat (DEV-36).
+LITERALS = (".float 0.0, -0.0, 1.0, -1.5, 0.1, 3.14159265, 1e10, 1e-10, 1e-46, "
+            "16777217, 0x1.8p1, Inf, -Inf, NaN, 1.17549435e-38, 3.4e38\n"
+            ".double 0.1, 1e300, 1e-320, 4.9e-324, 1.7976931348623157e308, Inf\n")
+
+
+def test_the_values_of_float_literals_agree(rars, tmp_path):
+    program, paths = build(tmp_path, ".data\n" + LITERALS)
+    assert program.diagnostics == ()
+    theirs = rars.assemble([paths[0]])
+    assert theirs.messages == []
+    ours = [int.from_bytes(program.data[i:i + 4], "little")
+            for i in range(0, len(program.data), 4)]
+    assert ours == theirs.data[:len(ours)]
+
+
+def test_a_literal_is_rounded_once(rars, tmp_path):
+    """DEV-36: this literal lies just above the midpoint between two singles,
+    and rounding it to a double first lands exactly on that midpoint, from where
+    a second rounding goes to the even value below. One rounding goes up."""
+    literal = ("1.00000029802322387695312582718061255302767487140869206996285356581"
+               "21109008789062")
+    program, paths = build(tmp_path, f".data\nv: .float {literal}\n")
+    assert program.diagnostics == ()
+    assert program.data[:4] == (0x3F800003).to_bytes(4, "little")
+    assert rars.assemble([paths[0]]).data[:1] == [0x3F800002]
+
+
+def test_a_value_too_large_for_its_format(rars, tmp_path):  # DEV-42
+    """A literal that has no value in its format is refused with the message of
+    RARS. RARS itself asks the question differently: it reads every literal as a
+    64-bit value and compares THAT with the largest single, so it refuses a
+    `.float` value that rounds to the largest single, and refuses nothing at all
+    for `.double`. We refuse exactly the values whose rounding overflows."""
+    program, paths = build(tmp_path, ".data\nv: .float 1.0, 1e40\n")
+    theirs = rars.assemble([paths[0]])
+    ours = [(d.loc.line, d.loc.column, d.message) for d in program.diagnostics]
+    assert ours == [(m.line, m.column, m.text) for m in theirs.messages]
+    assert ours == [(2, 16, '"1e40" is an out-of-range value')]
+
+    program, paths = build(tmp_path, ".data\nw: .double 1e400\n")
+    assert [d.message for d in program.diagnostics] == [
+        '"1e400" is an out-of-range value']
+    theirs = rars.assemble([paths[0]])
+    assert theirs.messages == [] and theirs.data[:2] == [0x00000000, 0x7FF00000]
+
+    # a value between the largest single and the overflow: it rounds to the
+    # largest single, which RARS refuses although the value has a rounding
+    program, paths = build(tmp_path, ".data\nv: .float 3.4028235e38\n")
+    assert program.diagnostics == ()
+    assert program.data[:4] == (0x7F7FFFFF).to_bytes(4, "little")
+    theirs = rars.assemble([paths[0]])
+    assert [m.text for m in theirs.messages] == [
+        '"3.4028235e38" is an out-of-range value']

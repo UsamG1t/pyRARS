@@ -1,13 +1,15 @@
-"""RARS 1.6 as the reference assembler for devel tests.
+"""RARS 1.6 as the reference assembler and simulator for devel tests.
 
 RARS is used only through its command line (RARS source: src/rars/Launch.java):
 
     java -jar rars1_6.jar nc a ae1 dump .text HexText <f> dump .data HexText <f>
                                    dump .text SegmentWindow <f> <options> <files>
+    java -jar rars1_6.jar nc ae1 se1 <max steps> <options> <files>
 
 nc   - no copyright banner
 a    - assemble only, do not simulate
 ae1  - exit code 1 if assembling failed
+se1  - exit code 1 if the program failed while running
 dump - write a segment to a file; RARS writes no dump files if assembling failed.
 """
 
@@ -84,6 +86,38 @@ def assemble(files: list[Path], options: tuple[str, ...] = ()) -> Result:
             messages=parse_messages(run.stdout),
             stdout=run.stdout,
         )
+
+
+@dataclass(frozen=True)
+class RunResult:
+    exit_code: int
+    stdout: str  # what the program printed, plus the messages of RARS
+    stderr: str  # a Java stack trace when RARS itself fails
+    messages: list[Message]
+
+
+def run(files: list[Path], options: tuple[str, ...] = (), max_steps: int = 200_000,
+        stdin: str = "", timeout: int = 120, arguments: tuple[str, ...] = ()) -> RunResult:
+    """Assemble and run a program with RARS; the program reports through syscalls.
+
+    `arguments` are the arguments of the program: RARS takes them after `pa`, which
+    has to come last of all, after the files.
+    """
+    if not available():
+        raise RuntimeError("RARS oracle needs `java` in PATH and " + str(JAR))
+    command = [
+        JAVA, "-jar", str(JAR), "nc", f"ae{ASSEMBLY_ERROR_EXIT}", "se1", str(max_steps),
+        *options,
+        *(str(f) for f in files),
+        *(("pa", *arguments) if arguments else ()),
+    ]
+    done = subprocess.run(command, capture_output=True, text=True, input=stdin, timeout=timeout)
+    return RunResult(
+        exit_code=done.returncode,
+        stdout=done.stdout,
+        stderr=done.stderr,
+        messages=parse_messages(done.stdout),
+    )
 
 
 def read_words(path: Path) -> list[int]:

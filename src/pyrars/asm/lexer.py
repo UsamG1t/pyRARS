@@ -28,6 +28,7 @@ from enum import Enum, auto
 from pyrars.asm.directives import DIRECTIVES
 from pyrars.isa.program import Diagnostic, SourceLoc
 from pyrars.isa.registers import CSRS, F_NAMES, ROUNDING_MODES, X_ALIASES, X_NAMES
+from pyrars.softfloat.text import LITERAL, WORDS
 
 
 class Kind(Enum):
@@ -79,11 +80,6 @@ def tokenize_line(text: str, operators: Collection[str],
 # ---------------------------------------------------------------- literals
 
 _INTEGER = re.compile(r"0[xX]([0-9a-fA-F]+)|(0[0-7]*)|([1-9][0-9]*)")
-_REAL = re.compile(r"""(?:
-      (?:[0-9]+\.[0-9]*|\.[0-9]+)(?:[eE][+-]?[0-9]+)?                     # 1.5  1.  .5  1.5e-3
-    | [0-9]+[eE][+-]?[0-9]+                                               # 1e3
-    | 0[xX](?:[0-9a-fA-F]+\.?|[0-9a-fA-F]*\.[0-9a-fA-F]+)[pP][+-]?[0-9]+  # 0x1.8p1
-)""", re.X)
 # A real number up to its exponent sign: "1.5e" in "1.5e-3", "0x1p" in "0x1p-2"
 _MANTISSA = re.compile(r"(?:(?:[0-9]+\.?[0-9]*|\.[0-9]+)[eE]|0[xX](?:[0-9a-fA-F]+\.?|[0-9a-fA-F]*\.[0-9a-fA-F]+)[pP])")
 _LOCAL_LABEL = re.compile(r"([0-9]+)[bf]")
@@ -112,8 +108,12 @@ def parse_integer(text: str) -> int | None:
 
 
 def parse_real(text: str) -> float | None:
-    """Value of a floating point literal in C form (asm manual), or None."""
-    if not _REAL.fullmatch(text):
+    """Value of a floating point literal in C form (asm manual), or None.
+
+    The value is only the token's own: the bytes of a `.float` or `.double` are
+    written by `pyrars.softfloat`, from the text of the literal (DEV-36).
+    """
+    if not LITERAL.fullmatch(text):
         return None
     return float.fromhex(text) if "x" in text.lower() else float(text)
 
@@ -162,7 +162,7 @@ def _classify(word: str, operators: Collection[str]) -> tuple[Kind, int | float 
     local = _LOCAL_LABEL.fullmatch(word)
     if local:
         return Kind.LOCAL_LABEL, int(local[1])
-    if word in ("Inf", "NaN"):  # RARS words for infinity and not-a-number
+    if word in WORDS:  # the RARS words for infinity and not-a-number
         return Kind.REAL_NUMBER, math.inf if word == "Inf" else math.nan
     real = parse_real(word)
     if real is not None:
