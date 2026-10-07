@@ -20,7 +20,8 @@ tables of `pyrars.isa` that say so (user decision 2026-10-04).
 
 A step limit counts turns, as RARS counts them, and not instructions carried out:
 a turn that only takes a trap is a turn. The count of instructions is `instret`,
-which a faulting instruction and the service that ends a program never reach.
+which a faulting instruction and the service that ends a program never reach - and
+the devices of `pyrars.devices` are told of exactly the instructions that reach it.
 """
 
 from collections.abc import Sequence
@@ -82,6 +83,12 @@ class Simulator:
         self.count = 0  # instructions carried out
         self.paused = False
         self.stopped = False
+        # The devices of `pyrars.devices` hear of every instruction carried out,
+        # which is what replaces the text-fetch observation of RARS. The `Bus`
+        # protocol of the memory knows only read and write, so a bus that wants to
+        # hear says so by having the method; without one the loop pays one
+        # comparison (INV-Z).
+        self._tick = getattr(machine.memory.bus, "on_retire", None)
 
     def load(self, program: AssembledProgram, arguments: Sequence[str] = ()) -> None:
         self.machine.load(program, arguments)
@@ -133,6 +140,8 @@ class Simulator:
     def _retired(self, turn: Stepped) -> Stepped:
         self.machine.csr.retire()
         self.count += 1
+        if self._tick is not None:
+            self._tick(1)
         return Stepped(turn.pc, turn.word, turn.instr, self.machine.x.pc, turn.taken,
                        turn.trap, retired=True)
 
