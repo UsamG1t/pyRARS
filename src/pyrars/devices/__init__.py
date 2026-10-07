@@ -1,9 +1,10 @@
 """The devices of pyRARS: models of what a program can talk to.
 
 A device is named, so that the command line and the interface can ask for it by
-name. The table below is the registry; reading the entry points of installed
-packages - which would pick up devices of others as well - comes when the project
-becomes installable (decision of 2026-10-07).
+name. The table below is the registry, and the built-in devices are put in it at
+the end of this module - they know nothing of it themselves. Reading the entry
+points of installed packages, which would pick up devices of others as well, comes
+when the project becomes installable (decision of 2026-10-07).
 """
 
 from collections.abc import Callable
@@ -37,3 +38,12 @@ def make(name: str, **options: object) -> Part:
 
 def names() -> tuple[str, ...]:
     return tuple(sorted(DEVICES))
+
+
+# The built-in devices, each known by its own name. The imports are down here so
+# that a device module needs nothing of this one.
+from pyrars.devices.keyboard import KeyboardDisplay  # noqa: E402
+from pyrars.devices.lab import DigitalLab  # noqa: E402
+
+for _built_in in (KeyboardDisplay, DigitalLab):
+    register(_built_in.name, _built_in)

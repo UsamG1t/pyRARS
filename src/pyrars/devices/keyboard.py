@@ -38,7 +38,6 @@ is an option, 80 by 25 by default (DEV-56).
 
 from collections.abc import Callable
 
-from pyrars.devices import register
 from pyrars.devices.base import Connection, Model
 
 # The registers, counted from the base of the device area.
@@ -254,6 +253,3 @@ class KeyboardDisplay(Model):
     def _changed(self) -> None:
         for watcher in self.watchers:
             watcher()
-
-
-register(KeyboardDisplay.name, KeyboardDisplay)
