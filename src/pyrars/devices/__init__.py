@@ -42,8 +42,10 @@ def names() -> tuple[str, ...]:
 
 # The built-in devices, each known by its own name. The imports are down here so
 # that a device module needs nothing of this one.
+from pyrars.devices.bitmap import BitmapDisplay  # noqa: E402
 from pyrars.devices.keyboard import KeyboardDisplay  # noqa: E402
 from pyrars.devices.lab import DigitalLab  # noqa: E402
+from pyrars.devices.timer import Timer  # noqa: E402
 
-for _built_in in (KeyboardDisplay, DigitalLab):
+for _built_in in (KeyboardDisplay, DigitalLab, Timer, BitmapDisplay):
     register(_built_in.name, _built_in)
