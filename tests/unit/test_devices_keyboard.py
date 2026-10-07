@@ -323,6 +323,73 @@ def test_a_watcher_is_told_of_a_change():
     assert len(changes) == told
 
 
+# ------------------------------------------------------------ the queue of keys
+
+
+def test_a_keyboard_that_holds_several_keys():
+    """Ours alone (DEV-58): RARS keeps one key and loses the rest."""
+    machine, device = keyboard(queue=3)
+    for letter in "abcd":
+        device.type_key(letter)
+    assert device.lost == 1  # three fit, the fourth had nowhere to wait
+    assert [chr(register(machine, RECEIVER_DATA)) for _ in range(3)] == ["a", "b", "c"]
+    assert device.waiting_for_a_key is True
+
+
+def test_a_key_of_the_queue_follows_the_one_the_program_read():
+    machine, device = keyboard(queue=2)
+    device.type_key("a")
+    device.type_key("b")
+    assert register(machine, RECEIVER_CONTROL) == READY
+    assert register(machine, RECEIVER_DATA) == ord("a")
+    assert register(machine, RECEIVER_CONTROL) == READY  # the next one is there
+    assert register(machine, RECEIVER_DATA) == ord("b")
+    assert register(machine, RECEIVER_CONTROL) == 0
+
+
+def test_a_key_of_the_queue_asks_for_attention_as_well():
+    machine, device = keyboard(queue=2)
+    put(machine, RECEIVER_CONTROL, INTERRUPT)
+    device.type_key("a")
+    device.type_key("b")
+    machine.pending.external = None  # the machine took the first one
+    register(machine, RECEIVER_DATA)  # the program reads, the next key comes up
+    assert machine.pending.external == KEY_INTERRUPT
+
+
+def test_a_keyboard_of_one_key_keeps_the_last_as_rars_does():
+    machine, device = keyboard(queue=1)
+    device.type_key("a")
+    device.type_key("b")
+    assert (device.keys, device.lost) == ([], 0)
+    assert register(machine, RECEIVER_DATA) == ord("b")
+
+
+def test_whether_another_key_may_be_typed():
+    machine, device = keyboard(queue=2)
+    assert device.room is True
+    device.type_key("a")
+    assert device.room is True  # one may still wait
+    device.type_key("b")
+    assert device.room is False
+    register(machine, RECEIVER_DATA)
+    assert device.room is True
+
+
+def test_a_reset_forgets_the_keys_that_waited():
+    machine, device = keyboard(queue=3)
+    for letter in "abcd":
+        device.type_key(letter)
+    device.reset()
+    assert (device.keys, device.lost) == ([], 0)
+
+
+def test_a_keyboard_that_holds_nothing():
+    with pytest.raises(ValueError, match="at least one key"):
+        KeyboardDisplay(queue=0)
+
+
 def test_the_device_is_known_by_name():
     assert isinstance(make("keyboard"), KeyboardDisplay)
     assert isinstance(make("keyboard", delay=10, technique="uniform"), KeyboardDisplay)
+    assert make("keyboard", queue=4).queue == 4

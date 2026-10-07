@@ -10,10 +10,12 @@ The protocol is the one of RARS (R-DEV-KBD, read from the byte code of
     MMIO+0xc  TxData    the character to show, in its low 8 bits
 
 A key typed sets the ready bit of `RcvCtrl` and puts the key in `RcvData`; reading
-`RcvData` clears that ready bit, so the program sees each key once. Only the last
-key typed is kept: the one before is lost if the program did not read it, exactly
-as in RARS - a front-end that feeds a text watches the ready bit and types the next
-key when the program has taken the one before.
+`RcvData` clears that ready bit, so the program sees each key once. By default only
+the last key typed is kept and the one before is lost if the program did not read
+it, exactly as in RARS; `queue` says how many keys the keyboard can hold at once,
+and a larger number keeps the rest waiting until the program takes them (DEV-58).
+A front-end that feeds a text asks `room` whether it may type without losing
+anything.
 
 Writing `TxData` while the display is ready clears the ready bit and starts a
 delay, counted in instructions carried out (which is what replaces the text-fetch
@@ -78,12 +80,17 @@ class KeyboardDisplay(Model):
 
     def __init__(self, delay: int = DEFAULT_DELAY, technique: str = "fixed",
                  rows: int = ROWS, columns: int = COLUMNS,
-                 show_after_delay: bool = True) -> None:
+                 show_after_delay: bool = True, queue: int = 1) -> None:
         super().__init__()
         if technique not in TECHNIQUES:
             raise ValueError(f'"{technique}": the delay is {" or ".join(TECHNIQUES)}')
         if delay < 1 or rows < 1 or columns < 1:
             raise ValueError("a delay, a number of rows and of columns are all at least 1")
+        if queue < 1:
+            raise ValueError("the keyboard holds at least one key")
+        self.queue = queue  # keys it can hold at once; 1 is what RARS keeps
+        self.keys: list[int] = []  # the ones waiting behind the one in the register
+        self.lost = 0  # keys that arrived with nowhere to wait
         self.delay = delay
         self.technique = technique
         self.rows = rows
@@ -103,6 +110,8 @@ class KeyboardDisplay(Model):
     # ------------------------------------------------------------- the machine
 
     def reset(self) -> None:
+        self.keys = []
+        self.lost = 0
         self.text = ""
         self.grid = []
         self.place = (0, 0)
@@ -123,6 +132,8 @@ class KeyboardDisplay(Model):
         if address == self._address(RECEIVER_DATA):
             # The program has taken the key: the next one may come.
             self._control(RECEIVER_CONTROL, self._register(RECEIVER_CONTROL) & ~READY)
+            if self.keys:  # one was waiting behind it
+                self._deliver(self.keys.pop(0))
         return value
 
     def write(self, address: int, size: int, value: int) -> None:
@@ -161,20 +172,38 @@ class KeyboardDisplay(Model):
     # ------------------------------------------------------- the front-end side
 
     def type_key(self, key: str | int) -> None:
-        """A key was typed. Only the last one is kept, as in RARS: a front-end that
-        feeds a text waits for the program to read the one before."""
-        code = ord(key) if isinstance(key, str) else key
-        self._poke(RECEIVER_DATA, code & 0xFF)
+        """A key was typed.
+
+        With a keyboard that holds one key, as RARS keeps it, the new key takes the
+        place of one the program has not read. With a longer one the new key waits
+        its turn, and only a keyboard that is full loses it (DEV-58).
+        """
+        code = (ord(key) if isinstance(key, str) else key) & 0xFF
+        if self.queue == 1 or self.waiting_for_a_key:
+            self._deliver(code)
+        elif len(self.keys) < self.queue - 1:
+            self.keys.append(code)
+        else:
+            self.lost += 1
+        self._changed()
+
+    def _deliver(self, code: int) -> None:
+        """A key goes into the register, and the program hears of it if it asked."""
+        self._poke(RECEIVER_DATA, code)
         control = self._register(RECEIVER_CONTROL) | READY
         self._control(RECEIVER_CONTROL, control)
         if control != READY:
             self.connection.interrupts.external(KEY_INTERRUPT)
-        self._changed()
 
     @property
     def waiting_for_a_key(self) -> bool:
         """Whether the program has read the key typed before."""
         return not self._register(RECEIVER_CONTROL) & READY
+
+    @property
+    def room(self) -> bool:
+        """Whether another key can be typed without a key being lost."""
+        return (self.queue == 1 and self.waiting_for_a_key) or len(self.keys) < self.queue - 1
 
     def shown(self) -> str:
         """What the display holds, as lines of text."""
