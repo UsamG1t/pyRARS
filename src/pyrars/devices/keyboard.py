@@ -15,7 +15,8 @@ the last key typed is kept and the one before is lost if the program did not rea
 it, exactly as in RARS; `queue` says how many keys the keyboard can hold at once,
 and a larger number keeps the rest waiting until the program takes them (DEV-58).
 A front-end that feeds a text asks `room` whether it may type without losing
-anything.
+anything, or hands over a `feed` of its own and lets the keyboard take a key
+whenever it has room.
 
 Writing `TxData` while the display is ready clears the ready bit and starts a
 delay, counted in instructions carried out (which is what replaces the text-fetch
@@ -105,6 +106,7 @@ class KeyboardDisplay(Model):
         self.counted = 0
         self.limit = 0
         self.waiting = 0  # the word whose character is to be shown
+        self.source: Callable[[], str | None] | None = None  # where keys come from
         self.watchers: list[Callable[[], None]] = []
 
     # ------------------------------------------------------------- the machine
@@ -155,7 +157,12 @@ class KeyboardDisplay(Model):
         self.limit = self._delay()
 
     def on_retire(self, count: int) -> None:
-        """Instructions have been carried out: the delay of the display runs on."""
+        """Instructions have been carried out: a key may be typed and the delay of
+        the display runs on."""
+        if self.source is not None and self.room:
+            key = self.source()
+            if key is not None:
+                self.type_key(key)
         if not self.counting:
             return
         self.counted += count
@@ -170,6 +177,13 @@ class KeyboardDisplay(Model):
             self.connection.interrupts.external(DISPLAY_INTERRUPT)
 
     # ------------------------------------------------------- the front-end side
+
+    def feed(self, source: Callable[[], str | None]) -> None:
+        """Where keys come from while the machine runs: a front-end with a text to
+        type gives a function that answers the next character, or None when there
+        are none left. A key is taken whenever the keyboard has room for it, so a
+        program never loses one and never waits for a hand to move."""
+        self.source = source
 
     def type_key(self, key: str | int) -> None:
         """A key was typed.
