@@ -18,7 +18,8 @@ window (DEV-55).
 
 import argparse
 import sys
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
+from pathlib import Path
 
 from pyrars.asm import disasm
 from pyrars.asm.assembler import Options, assemble
@@ -26,6 +27,7 @@ from pyrars.core.machine import Machine
 from pyrars.core.options import Options as RunOptions
 from pyrars.core.simulator import Simulator, Stop, StopReason
 from pyrars.core.systemio import ConsoleIO
+from pyrars.devices import DeviceBus, make, names as device_names
 from pyrars.isa.memory import CONFIGS, MemoryConfig
 from pyrars.isa.program import AssembledProgram, Diagnostic, SourceLoc
 from pyrars.isa.registers import CSRS, F_NAMES, X_ALIASES, X_NAMES
@@ -102,6 +104,11 @@ def _parser() -> argparse.ArgumentParser:
                      help="how printed values look (default: hex)")
     run.add_argument("--break", dest="breakpoints", default="", metavar="ADDRESSES",
                      help="stop before the instruction at any of these addresses")
+    run.add_argument("--device", action="append", default=[], metavar="NAME[:OPTIONS]",
+                     help=f"attach a device ({', '.join(device_names())}); options as "
+                          "key=value separated by commas, e.g. "
+                          "keyboard:delay=10,keys=input.txt or disk:file=blocks.img; "
+                          "may be repeated")
     run.add_argument("--args", nargs="*", default=[], metavar="ARG",
                      help="arguments of the program itself; comes last of all, because "
                           "everything after it belongs to the program")
@@ -253,14 +260,24 @@ def _run(arguments, out, errors, reader) -> int:
         print(problem, file=errors)
         return 1
 
+    try:
+        bus, afterwards = _devices(arguments.device, out, reader)
+    except (ValueError, TypeError, OSError) as problem:
+        print(problem, file=errors)
+        return 1
+
     # A plain run keeps no journal: there is nobody to look at it (user decision
     # 2026-10-05); a debugging session asks for one.
     machine = Machine(RunOptions(xlen=arguments.xlen, config=config,
                                  self_modifying=arguments.self_modifying),
-                      io=ConsoleIO(out=out, errors=errors, reader=reader))
+                      bus=bus, io=ConsoleIO(out=out, errors=errors, reader=reader))
+    if bus is not None:
+        bus.connect(machine)
     simulator = Simulator(machine)
     simulator.load(program, arguments.args)
     stop = simulator.run(max_steps=arguments.steps, breakpoints=breakpoints)
+    for finish in afterwards:
+        finish()
 
     _report(stop, program, arguments.steps, errors)
     if arguments.instruction_count:
@@ -273,6 +290,104 @@ def _run(arguments, out, errors, reader) -> int:
     if stop.reason is StopReason.EXCEPTION:
         return 1
     return stop.code
+
+
+# What a device needs of the world outside, which the device itself never touches:
+# where the keys of a keyboard come from, and the file a disk holds.
+OUTSIDE = {"keyboard": "keys", "disk": "file"}
+
+
+def _devices(requests: Sequence[str], out, reader):
+    """Build the devices a run was asked for, and what to do when it is over.
+
+    The devices know nothing of files: a keyboard is given a text to type and a
+    disk an image of bytes, and putting the image back is one of the things left to
+    do afterwards.
+    """
+    if not requests:
+        return None, ()
+    bus = DeviceBus()
+    afterwards = []
+    for request in requests:
+        name, options = _asked_for(request)
+        outside = options.pop(OUTSIDE.get(name, ""), None)
+        try:
+            device = make(name, **options)
+        except TypeError as problem:  # an option the device has not got
+            raise ValueError(f'"{request}": {problem}') from None
+        bus.add(device)
+        if name == "keyboard":
+            if outside is not None:
+                letters = iter(_text_of(str(outside), reader))
+                device.feed(lambda: next(letters, None))
+            afterwards.append(_display(device, out))
+        elif name == "disk" and outside is not None:
+            afterwards.append(_image(device, str(outside)))
+    return bus, afterwards
+
+
+def _asked_for(request: str) -> tuple[str, dict[str, object]]:
+    """"keyboard:delay=10,keys=in.txt" as a name and what was asked of it."""
+    name, _, rest = request.partition(":")
+    options: dict[str, object] = {}
+    for piece in rest.split(",") if rest else ():
+        key, sign, value = piece.partition("=")
+        if not sign:
+            raise ValueError(f'"{request}": an option of a device is key=value')
+        options[key.strip()] = _said(value.strip())
+    return name.strip(), options
+
+
+def _said(text: str) -> object:
+    """A number, a yes or no, or a text, as it was written."""
+    if text in ("yes", "true"):
+        return True
+    if text in ("no", "false"):
+        return False
+    try:
+        return int(text, 0)
+    except ValueError:
+        return text
+
+
+def _text_of(path: str, reader) -> str:
+    """The text a keyboard is to type: a file, or the standard input for "-"."""
+    return reader.read() if path == "-" else Path(path).read_text()
+
+
+def _display(device, out) -> Callable[[], None]:
+    """Show what the display of a keyboard shows.
+
+    While it scrolls, every character goes out as it appears, which is the console
+    answering for the window of a tool. In the mode where a character goes where it
+    is told, the picture of it is printed when the run is over, because a terminal
+    cannot take back what has already left it.
+    """
+    gone = [0]  # how much of the scrolling text has gone out
+
+    def changed() -> None:
+        if device.told_where:
+            return
+        text = device.text
+        if len(text) > gone[0]:
+            out.write(text[gone[0]:])
+            gone[0] = len(text)
+
+    device.subscribe(changed)
+
+    def finish() -> None:
+        if device.told_where:
+            out.write(device.shown() + "\n")
+
+    return finish
+
+
+def _image(device, path: str) -> Callable[[], None]:
+    """Put the file on the disk, and give back what will write it back."""
+    place = Path(path)
+    if place.exists():
+        device.load(place.read_bytes())
+    return lambda: place.write_bytes(device.saved())
 
 
 def _report(stop: Stop, program: AssembledProgram, limit: int | None, errors) -> None:
