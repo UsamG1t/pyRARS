@@ -88,12 +88,15 @@ class ConsoleIO:
         self.files: dict[int, IO[bytes]] = {}
         self.taken = ""  # everything read from the input, kept for a step back
         self.cursor = 0  # how much of it the program has read
+        self.fresh = True  # whether what was last written ended its line
 
     # ------------------------------------------------------------- the streams
 
     def write(self, fd: int, data: bytes) -> int:
         if fd == STANDARD_OUTPUT:
             self.out.write(data.decode("utf-8", "replace"))
+            if data:
+                self.fresh = data.endswith(b"\n")
             return len(data)
         if fd == STANDARD_ERROR:
             self.errors.write(data.decode("utf-8", "replace"))
