@@ -108,6 +108,13 @@ class History:
         )
         self.steps.append(self.open)
 
+    def close(self) -> None:
+        """The step is over. Whatever is written to a place from now on belongs to
+        no step and so cannot be taken back - which is what a tool writing into a
+        halted machine wants: a step back must not undo what a person asked for.
+        """
+        self.open = None
+
     def record(self, kind: Kind, where: int | str, value: object) -> None:
         """A place is about to change: this is what it holds now.
 

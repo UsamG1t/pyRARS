@@ -127,6 +127,20 @@ class BlockDevice(Model):
 
     # ------------------------------------------------------- the front-end side
 
+    def state(self) -> dict[str, object]:
+        return {
+            "blocks": self.blocks,
+            "block": f"{self.block_size} bytes",
+            "delay": f"{self.delay} instruction{'s' if self.delay != 1 else ''}"
+                     " a block",
+            "working": self.busy,
+            "way": "to the disk" if self.writing else "from the disk",
+            "at block": self.block,
+            "buffer": f"0x{self.buffer:08x}",
+            "blocks left": self.left,
+            "refused": self.error,
+        }
+
     def load(self, data: bytes) -> None:
         """Put an image on the disk: what a command line does before a run."""
         if len(data) != len(self.image):

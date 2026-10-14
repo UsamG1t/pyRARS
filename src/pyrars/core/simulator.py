@@ -99,11 +99,23 @@ class Simulator:
 
     def step(self) -> Stepped | Stop:
         """One turn of the loop: `Stepped` when the machine went on, `Stop` when
-        it did not."""
-        machine = self.machine
-        if machine.history is not None:
-            machine.history.begin(machine)
+        it did not.
 
+        The step of the journal is opened here and closed here, however the turn
+        ends, so that everything the turn did can be taken back and nothing done
+        between turns is taken back with it.
+        """
+        machine = self.machine
+        if machine.history is None:
+            return self._turn(machine)
+        machine.history.begin(machine)
+        try:
+            return self._turn(machine)
+        finally:
+            machine.history.close()
+
+    def _turn(self, machine: Machine) -> Stepped | Stop:
+        """The turn itself."""
         event = traps.take(machine)
         if event is not None and not event.handled:  # nowhere to go
             return Stop(StopReason.EXCEPTION, event.pc, event.message)

@@ -26,7 +26,6 @@ from pyrars.asm.assembler import Options, assemble
 from pyrars.core.machine import Machine
 from pyrars.core.options import Options as RunOptions
 from pyrars.core.simulator import Simulator, Stop, StopReason
-from pyrars.core.memory import Access
 from pyrars.core.systemio import ConsoleIO
 from pyrars.analysis import cache as cache_model
 from pyrars.analysis import predictors
@@ -34,6 +33,7 @@ from pyrars.analysis.callstack import CallStack
 from pyrars.analysis.pipeline import Pipeline
 from pyrars.analysis.pipeline import Settings as PipelineSettings
 from pyrars.analysis.stats import Statistics
+from pyrars.analysis.watchers import Watchers
 from pyrars.devices import DeviceBus, make, names as device_names
 from pyrars.isa.classes import Kind
 from pyrars.isa.memory import CONFIGS, MemoryConfig
@@ -339,84 +339,61 @@ def _run(arguments, out, errors, reader) -> int:
     for low, high in ranges:
         _memory(machine, low, high, arguments.format, out)
     if watchers:
-        watchers.told(program, out)
+        _told(watchers, program, out)
     if stop.reason is StopReason.EXCEPTION:
         return 1
     return stop.code
 
 
-class Watchers:
-    """The models of `pyrars.analysis` a run was asked for.
+def _told(watchers: Watchers, program: AssembledProgram, out) -> None:
+    """What the models have to say, one `name<tab>value` to a line.
 
-    They are handed what the run did - every turn from the loop, and the accesses
-    of memory through a subscription - and they touch nothing of it (INV-P).
+    The models themselves are held and fed by `analysis.watchers.Watchers`, which
+    the window of a session uses too; what belongs to the command line is only
+    this, the turning of what they counted into lines for a terminal.
     """
-
-    def __init__(self, arguments, machine: Machine) -> None:
-        self.statistics = Statistics() if arguments.stats else None
-        self.caches, self.fetches = _caches(arguments.cache, machine)
-        self.pipeline = _pipeline(arguments.pipeline)
-        self.callstack = CallStack() if arguments.callstack else None
-        self.machine = machine
-
-    def __bool__(self) -> bool:
-        return any((self.statistics, self.caches, self.pipeline, self.callstack))
-
-    def saw(self, turn) -> None:
-        """One turn of the loop."""
-        if self.statistics is not None:
-            self.statistics.saw(turn)
-        if self.pipeline is not None:
-            self.pipeline.saw(turn)
-        if self.callstack is not None:
-            self.callstack.saw(turn, sp=self.machine.x.read(2))
-        if self.fetches:
-            self.caches.fetch(turn.pc)
-
-    def told(self, program: AssembledProgram, out) -> None:
-        """What the models have to say, one `name<tab>value` to a line."""
-        if self.statistics is not None:
-            _said(out, "instructions", self.statistics.instructions)
-            _said(out, "turns", self.statistics.turns)
-            for name, many in self.statistics.kinds().items():
-                _said(out, f"kind.{name}", many)
-            for name, many in self.statistics.categories().items():
-                _said(out, f"category.{name.lower()}", many)
-            if self.statistics.by_kind.get(Kind.BRANCH):
-                _said(out, "branches.taken", self.statistics.taken)
-                _said(out, "branches.not-taken", self.statistics.not_taken)
-        if self.caches is not None:
-            for side, cache in self.caches.each().items():
-                for name, value in (("accesses", cache.accesses), ("hits", cache.hits),
-                                    ("misses", cache.misses),
-                                    ("rate", round(cache.hit_rate, 4)),
-                                    ("writebacks", cache.writebacks),
-                                    ("through", cache.through)):
-                    _said(out, f"{side}.{name}", value)
-        if self.pipeline is not None:
-            _said(out, "pipeline.cycles", self.pipeline.cycles)
-            _said(out, "pipeline.instructions", self.pipeline.instructions)
-            _said(out, "pipeline.cpi", round(self.pipeline.cpi, 4))
-            _said(out, "pipeline.lost", self.pipeline.lost)
-            for cause, many in sorted(self.pipeline.stalls.items()):
-                _said(out, f"pipeline.lost.{cause}", many)
-            _said(out, "pipeline.branches", self.pipeline.branches)
-            _said(out, "pipeline.wrong", self.pipeline.mispredictions)
-            _said(out, "pipeline.guesser", self.pipeline.predictor.name)
-            for row in self.pipeline.diagram:
-                stages = " ".join(str(cycle) for cycle in row.starts)
-                print(f"pipeline.row\t0x{row.pc:08x}\t{row.mnemonic}\t{stages}", file=out)
-        if self.callstack is not None:
-            stack = self.callstack
-            for name, value in (("calls", stack.calls), ("returns", stack.returns),
-                                ("deepest", stack.deepest), ("depth", stack.depth),
-                                ("unmatched", stack.unmatched),
-                                ("confused", stack.confused), ("beyond", stack.beyond)):
-                _said(out, f"callstack.{name}", value)
-            for frame in stack.frames:
-                where = "?" if frame.sp is None else f"0x{frame.sp:08x}"
-                print(f"callstack.frame\t{_named(program, frame.called)}\t"
-                      f"0x{frame.called_from:08x}\t{where}", file=out)
+    if watchers.statistics is not None:
+        _said(out, "instructions", watchers.statistics.instructions)
+        _said(out, "turns", watchers.statistics.turns)
+        for name, many in watchers.statistics.kinds().items():
+            _said(out, f"kind.{name}", many)
+        for name, many in watchers.statistics.categories().items():
+            _said(out, f"category.{name.lower()}", many)
+        if watchers.statistics.by_kind.get(Kind.BRANCH):
+            _said(out, "branches.taken", watchers.statistics.taken)
+            _said(out, "branches.not-taken", watchers.statistics.not_taken)
+    if watchers.caches is not None:
+        for side, cache in watchers.caches.each().items():
+            for name, value in (("accesses", cache.accesses), ("hits", cache.hits),
+                                ("misses", cache.misses),
+                                ("rate", round(cache.hit_rate, 4)),
+                                ("writebacks", cache.writebacks),
+                                ("through", cache.through)):
+                _said(out, f"{side}.{name}", value)
+    if watchers.pipeline is not None:
+        _said(out, "pipeline.cycles", watchers.pipeline.cycles)
+        _said(out, "pipeline.instructions", watchers.pipeline.instructions)
+        _said(out, "pipeline.cpi", round(watchers.pipeline.cpi, 4))
+        _said(out, "pipeline.lost", watchers.pipeline.lost)
+        for cause, many in sorted(watchers.pipeline.stalls.items()):
+            _said(out, f"pipeline.lost.{cause}", many)
+        _said(out, "pipeline.branches", watchers.pipeline.branches)
+        _said(out, "pipeline.wrong", watchers.pipeline.mispredictions)
+        _said(out, "pipeline.guesser", watchers.pipeline.predictor.name)
+        for row in watchers.pipeline.diagram:
+            stages = " ".join(str(cycle) for cycle in row.starts)
+            print(f"pipeline.row\t0x{row.pc:08x}\t{row.mnemonic}\t{stages}", file=out)
+    if watchers.callstack is not None:
+        stack = watchers.callstack
+        for name, value in (("calls", stack.calls), ("returns", stack.returns),
+                            ("deepest", stack.deepest), ("depth", stack.depth),
+                            ("unmatched", stack.unmatched),
+                            ("confused", stack.confused), ("beyond", stack.beyond)):
+            _said(out, f"callstack.{name}", value)
+        for frame in stack.frames:
+            where = "?" if frame.sp is None else f"0x{frame.sp:08x}"
+            print(f"callstack.frame\t{_named(program, frame.called)}\t"
+                  f"0x{frame.called_from:08x}\t{where}", file=out)
 
 
 def _said(out, name: str, value) -> None:
@@ -432,7 +409,15 @@ def _named(program: AssembledProgram, address: int) -> str:
 
 
 def _watchers(arguments, machine: Machine) -> Watchers:
-    return Watchers(arguments, machine)
+    """The models a run was asked for, in the holder everything above the engine
+    feeds (`analysis.watchers`)."""
+    caches, fetches = _caches(arguments.cache, machine)
+    watchers = Watchers(statistics=Statistics() if arguments.stats else None,
+                        caches=caches, pipeline=_pipeline(arguments.pipeline),
+                        callstack=CallStack() if arguments.callstack else None,
+                        fetches=fetches, machine=machine)
+    watchers.listen()  # the accesses of memory, which do not come with a turn
+    return watchers
 
 
 CACHE_SIDES = ("data", "instructions", "unified")
@@ -474,11 +459,6 @@ def _caches(requests: Sequence[str], machine: Machine):
         caches = cache_model.Caches(data=sides.get("data", cache_model.Settings()),
                                     instructions=sides.get("instructions"))
         fetches = caches.split
-    config = machine.options.config
-    machine.memory.subscribe(Access.READ, lambda access: caches.read(access.address),
-                             config.data_segment_base, config.data_segment_limit)
-    machine.memory.subscribe(Access.WRITE, lambda access: caches.write(access.address),
-                             config.data_segment_base, config.data_segment_limit)
     return caches, fetches
 
 

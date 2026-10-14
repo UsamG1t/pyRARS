@@ -209,6 +209,19 @@ class KeyboardDisplay(Model):
         if control != READY:
             self.connection.interrupts.external(KEY_INTERRUPT)
 
+    def state(self) -> dict[str, object]:
+        return {
+            "shown": self.shown(),
+            "mode": "places" if self.told_where else "scrolling",
+            "size": f"{self.columns} by {self.rows}",
+            "place": f"{self.place[0]}, {self.place[1]}",
+            "key waiting": not self.waiting_for_a_key,
+            "keys queued": len(self.keys),
+            "keys lost": self.lost,
+            "display busy": self.counting,
+            "delay": f"{self.delay} ({self.technique})",
+        }
+
     @property
     def waiting_for_a_key(self) -> bool:
         """Whether the program has read the key typed before."""

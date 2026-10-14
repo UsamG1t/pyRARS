@@ -25,6 +25,13 @@ class Halt(Model):
     offset = HALT
     size = 4
 
+    def state(self) -> dict[str, object]:
+        return {"last written": self.connection.memory.peek(self._address(), 4)
+                if self.connection is not None else 0}
+
+    def _address(self) -> int:
+        return self.connection.config.mmio_base + HALT
+
     def read(self, address: int, size: int) -> int:
         """What was written last, which says nothing of its own."""
         return self.connection.memory.peek(address, size)
