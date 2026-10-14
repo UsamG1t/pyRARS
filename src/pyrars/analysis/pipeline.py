@@ -28,11 +28,13 @@ machine wait:
     default is two ports, which is what a machine with a cache of its own for the
     instructions has, and what the drawings in the books assume.
 
-A branch is guessed at. The run itself says where the branch went, so the model
-knows whether the guess was right; a wrong one throws away what was fetched after
-it, and the machine loses the cycles between the fetch and the stage where the
-branch is settled - two, since this model settles it in EX. An instruction that
-could not be carried out at all empties the pipeline in the same way.
+A branch is guessed at by one of the guessers of `analysis/predictors.py` - by
+default the one that never expects a branch to be taken. The run itself says where
+the branch went, so the model knows whether the guess was right; a wrong one throws
+away what was fetched after it, and the machine loses the cycles between the fetch
+and the stage where the branch is settled - two, since this model settles it in EX.
+An instruction that could not be carried out at all empties the pipeline in the
+same way.
 
 What comes out: the cycles the run would have taken, the instructions carried out,
 CPI, and the cycles lost by cause - so that "it waited 300 cycles for values and
@@ -47,6 +49,7 @@ from collections import Counter, deque
 from dataclasses import dataclass, field
 from enum import Enum, auto
 
+from pyrars.analysis.predictors import Static
 from pyrars.core.simulator import Stepped
 from pyrars.isa.classes import Kind, RegRef, kind, reads, writes
 
@@ -104,8 +107,11 @@ class Row:
 class Pipeline:
     """The time a run would have taken."""
 
-    def __init__(self, settings: Settings = Settings()) -> None:
+    def __init__(self, settings: Settings = Settings(), predictor=None) -> None:
         self.settings = settings
+        # How the machine guesses where a branch goes; without a table it never
+        # expects one to be taken (`analysis/predictors.py`).
+        self.predictor = predictor if predictor is not None else Static()
         self.instructions = 0
         self.cycles = 0
         self.stalls: Counter[str] = Counter()
@@ -176,6 +182,7 @@ class Pipeline:
 
     def reset(self) -> None:
         self.instructions = self.cycles = self.mispredictions = self.branches = 0
+        self.predictor.reset()
         self.stalls.clear()
         self.diagram.clear()
         self._free = dict.fromkeys(STAGES, 0)
@@ -229,15 +236,12 @@ class Pipeline:
             return
         self.branches += 1
         went = turn.next_pc != turn.pc + 4
-        if not self.guess(turn.pc, went):
+        guessed = self.predictor.guess(turn.pc)
+        self.predictor.told(turn.pc, went)
+        if guessed != went:
             self.mispredictions += 1
             self.stalls[BRANCH] += self.settings.penalty
             self._fetch_from = compute + self.settings.penalty
-
-    def guess(self, pc: int, went: bool) -> bool:
-        """Whether the guess about this branch was right. This machine never
-        expects a branch to be taken."""
-        return not went
 
     def _drawn(self, turn: Stepped, compute: int, decode: int, fetch: int,
                memory: int, back: int, ex_cycles: int) -> None:
