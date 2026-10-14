@@ -251,7 +251,7 @@ class Session:
                  io: SystemIO | None = None, bus=None, arguments: tuple[str, ...] = (),
                  statistics: bool = False, caches: Caches | None = None,
                  pipeline: Pipeline | None = None, fetches: bool = False,
-                 limit: int | None = None) -> None:
+                 limit: int | None = None, watch=None) -> None:
         self.program = program
         # A session keeps a journal, for `back` is the point of one, and takes the
         # world back with a step (the decision of stage 21).
@@ -264,6 +264,10 @@ class Session:
         # No movement of the session runs longer than this, so that a session
         # driven by a script cannot be caught for ever by a program without an end.
         self.limit = limit
+        # Whoever drives the session may hear every turn of the loop: a window
+        # makes its snapshots from this instead of cutting a run into pieces
+        # (stage 39). A session driven by hand sets nothing and pays a comparison.
+        self.watch = watch
         # Whether the addresses of the instructions reach a cache is the caller's
         # to say: a cache FOR EVERYTHING and a cache of the data alone are the
         # same object, and only whoever asked for it knows which was meant.
@@ -433,6 +437,8 @@ class Session:
         """Every turn of the loop: the models hear of it, and so does whatever was
         touched while it ran."""
         self.models.saw(turn)
+        if self.watch is not None:
+            self.watch(turn)
         for number, access in self._pending:
             self._touched.append(Touched(
                 number, "read" if access.kind is Access.READ else "write",
