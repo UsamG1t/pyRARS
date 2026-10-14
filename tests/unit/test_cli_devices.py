@@ -213,7 +213,7 @@ def test_an_option_a_device_has_not_got(tmp_path):
 def test_an_option_that_is_no_option(tmp_path):
     code, _, errors = run("run", "--device", "keyboard:delay", source(tmp_path, DMA))
     assert code == 1
-    assert "an option of a device is key=value" in errors
+    assert "an option is key=value" in errors
 
 
 def test_an_option_that_makes_no_sense_to_the_device(tmp_path):

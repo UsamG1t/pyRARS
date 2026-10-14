@@ -24,7 +24,7 @@ which a faulting instruction and the service that ends a program never reach - a
 the devices of `pyrars.devices` are told of exactly the instructions that reach it.
 """
 
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from enum import Enum, auto
 
@@ -148,7 +148,8 @@ class Simulator:
     # ---------------------------------------------------------------- a run
 
     def run(self, max_steps: int | None = None, breakpoints: frozenset[int] = frozenset(),
-            stop_at_ebreak: bool = False) -> Stop:
+            stop_at_ebreak: bool = False,
+            watch: Callable[[Stepped], None] | None = None) -> Stop:
         """Turn after turn, until something ends the run.
 
         A breakpoint stops the machine BEFORE the instruction at that address, and
@@ -156,6 +157,10 @@ class Simulator:
         stopped. `ebreak` stops the machine only when asked: RARS stops at it in its
         window and carries on past it from its command line (verified), and a
         debugger will ask for the first behaviour.
+
+        `watch` is handed every turn that did something, which is how the models of
+        `pyrars.analysis` are fed without their touching anything (INV-P); without
+        one the loop pays a single comparison (INV-Z).
         """
         self.paused = self.stopped = False
         turns = 0
@@ -176,6 +181,8 @@ class Simulator:
             turns += 1
             if isinstance(turn, Stop):
                 return turn
+            if watch is not None:
+                watch(turn)
             if stop_at_ebreak and turn.trap == traps.BREAKPOINT:
                 return Stop(StopReason.BREAKPOINT, turn.pc)
 

@@ -38,7 +38,9 @@ same way.
 
 What comes out: the cycles the run would have taken, the instructions carried out,
 CPI, and the cycles lost by cause - so that "it waited 300 cycles for values and
-80 for wrong guesses" can be said. The diagram of what happened in which cycle is
+80 for wrong guesses" can be said. Where one event is two causes at once - a long
+instruction both holds its stage and withholds its value - the wait is blamed on
+the value, since that is the thing the instruction behind it was waiting for. The diagram of what happened in which cycle is
 kept for the first instructions only (a number given with the settings), because a
 long run must not eat the memory.
 
