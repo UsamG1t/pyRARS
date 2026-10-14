@@ -403,7 +403,7 @@ def test_the_registers(sum_session):
     everything = sum_session.registers()
     assert len(everything) == 32
     assert (everything[0].name, everything[0].value) == ("zero", 0)
-    assert everything[0].about == "x0"
+    assert (everything[0].about, everything[0].file) == ("", "x")
     assert everything[2].name == "sp" and everything[2].value != 0
     few = sum_session.registers(("t1", "t2"))
     assert [(one.name, one.value) for one in few] == [("t1", 4), ("t2", 0)]
@@ -431,9 +431,10 @@ main:   li t0, 3
     s.step(3)
     single, double = s.floats(("f1",))[0], s.floats(("f2",))[0]
     assert single.name == "ft1" and single.bits == 64
-    assert single.about == "f1: 3.0 (single)"  # boxed, so read as a single
+    assert single.about == "3.0 (single)"  # boxed, so read as a single
+    assert single.file == "f"
     assert single.value >> 32 == 0xFFFFFFFF  # the box itself
-    assert double.about == "f2: 3.0"
+    assert double.about == "3.0"
     assert len(s.floats()) == 32
 
 
@@ -441,6 +442,7 @@ def test_the_control_registers(sum_session):
     everything = sum_session.csr()
     assert len(everything) == 17  # the whole set of them
     named = {one.name: one for one in sum_session.csr(("fcsr", "ustatus", "uie"))}
+    assert named["fcsr"].file == "csr"
     assert named["fcsr"].about == "flags 0x00, rounding 0"
     assert named["ustatus"].about == "nothing set"
     sum_session.set_register("ustatus", 0x11)
@@ -531,6 +533,45 @@ def test_without_anything_attached_there_is_nothing_to_show(sum_session):
         sum_session.device("keyboard")
 
 
+class Watching:
+    """A part of the bus that is reset only when it is TOLD to be.
+
+    Our own devices put themselves back when they are connected, so a session
+    that leaned on that would be resetting them by luck; a device from outside
+    implements the protocol as it likes, and the promise of `restart` must hold
+    for it too.
+    """
+
+    name = "watching"
+    counts = False
+
+    def __init__(self) -> None:
+        self.resets = 0
+        self.connection = None
+
+    def connect(self, connection) -> None:
+        self.connection = connection  # and NOT a reset
+
+    def on_retire(self, count: int) -> None:
+        pass
+
+    def reset(self) -> None:
+        self.resets += 1
+
+    def state(self) -> dict[str, object]:
+        return {"resets": self.resets}
+
+
+def test_a_restart_puts_a_device_back_itself(tmp_path):
+    watching = Watching()
+    s = session(SUM, tmp_path, bus=DeviceBus([watching]))
+    assert watching.resets == 1  # once as the session was built
+    s.carry_on()
+    s.restart()
+    assert watching.resets == 2  # and once more for the restart
+    assert s.device("watching").state == {"resets": 2}
+
+
 def test_the_devices_show_themselves(tmp_path):
     s = session(SUM, tmp_path, bus=DeviceBus([make("keyboard"), make("timer")]))
     attached = s.devices()
@@ -601,7 +642,7 @@ def test_a_value_put_in_the_register_that_is_always_zero(sum_session):
 def test_a_value_put_in_a_floating_point_register(sum_session):
     put = sum_session.set_register("ft1", 0x3FF0000000000000)
     assert put.name == "ft1"
-    assert put.about == "f1: 1.0"
+    assert put.about == "1.0"
 
 
 def test_a_value_put_in_a_control_register(sum_session):

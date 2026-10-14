@@ -55,6 +55,7 @@ WAITING = "waiting"
 TRAPPED = "trapped"
 PAUSED = "paused"
 NOTHING = "nothing"  # there was nothing to do
+ENDED = "ended"  # the run is over, and nothing but a restart or a step back follows
 
 REASONS = {
     StopReason.NORMAL_TERMINATION: EXITED,
@@ -115,6 +116,7 @@ class Value:
     value: int
     bits: int
     about: str = ""  # what the value means, where that is worth saying
+    file: str = "x"  # which file it belongs to: "x", "f" or "csr"
 
 
 @dataclass(frozen=True, slots=True)
@@ -248,7 +250,8 @@ class Session:
     def __init__(self, program: AssembledProgram, options: Options | None = None,
                  io: SystemIO | None = None, bus=None, arguments: tuple[str, ...] = (),
                  statistics: bool = False, caches: Caches | None = None,
-                 pipeline: Pipeline | None = None) -> None:
+                 pipeline: Pipeline | None = None, fetches: bool = False,
+                 limit: int | None = None) -> None:
         self.program = program
         # A session keeps a journal, for `back` is the point of one, and takes the
         # world back with a step (the decision of stage 21).
@@ -258,7 +261,13 @@ class Session:
         self.io = io if io is not None else ConsoleIO()
         self.bus = bus
         self.arguments = arguments
-        self.wanted = (statistics, caches, pipeline)
+        # No movement of the session runs longer than this, so that a session
+        # driven by a script cannot be caught for ever by a program without an end.
+        self.limit = limit
+        # Whether the addresses of the instructions reach a cache is the caller's
+        # to say: a cache FOR EVERYTHING and a cache of the data alone are the
+        # same object, and only whoever asked for it knows which was meant.
+        self.wanted = (statistics, caches, pipeline, fetches)
         self.format = "hex"
 
         self._places = {entry.address: entry for entry in program.text}
@@ -269,6 +278,15 @@ class Session:
         self._next_id = 1
         self._pending: list[tuple[int, MemAccess]] = []
         self._touched: list[Touched] = []
+        # Whether the run is over. A program that has exited, run off the end of
+        # its text or trapped with nowhere to go does not go on, and a movement
+        # says so instead of wandering: the way back is a restart - or a step
+        # back, for the journal reaches over the end of a run like anywhere else.
+        self.ended = False
+        # Where the world outside stood when the session began, so that a restart
+        # can put it back: the program reads the same input again, as it does after
+        # a step back under `Options.debug` (the decision of stage 21).
+        self._start = self.io.mark()
         self._build()
 
     # ------------------------------------------------------------- the machine
@@ -277,13 +295,15 @@ class Session:
         """A machine, a simulator and the models, as at the start of a run."""
         self.machine = Machine(self.options, bus=self.bus, io=self.io)
         if self.bus is not None:
+            self.bus.reset()  # a restart puts a device back where it began too
             self.bus.connect(self.machine)
         self.simulator = Simulator(self.machine)
-        statistics, caches, pipeline = self.wanted
+        statistics, caches, pipeline, fetches = self.wanted
         self.models = Watchers(
             statistics=Statistics() if statistics else None,
             caches=caches, pipeline=pipeline, callstack=CallStack(),
-            fetches=caches is not None and caches.split, machine=self.machine)
+            fetches=caches is not None and (fetches or caches.split),
+            machine=self.machine)
         self.models.listen()  # the accesses of memory, which do not come with a turn
         self.simulator.load(self.program, self.arguments)
         for watch in self._watches.values():
@@ -299,6 +319,8 @@ class Session:
         self._pending.clear()
         self._watches = {number: replace(watch, hits=0)
                          for number, watch in self._watches.items()}
+        self.ended = False
+        self.io.rewind(self._start)
         self._build()
         return Stopped(NOTHING, self.where())
 
@@ -306,6 +328,8 @@ class Session:
 
     def step(self, count: int = 1) -> Stopped:
         """One instruction at a time, `count` of them."""
+        if self.ended:
+            return Stopped(ENDED, self.where())
         done = 0
         for _ in range(max(count, 1)):
             turn = self.simulator.step()
@@ -326,10 +350,14 @@ class Session:
             if not self.simulator.back_step():
                 break
             done += 1
+        if done:
+            self.ended = False  # a step back reaches over the end of a run
         return self._answer(STEPPED if done else NOTHING, done)
 
     def over(self, count: int = 1) -> Stopped:
         """Like `step`, but a call is passed over - which is a guess (D21)."""
+        if self.ended:
+            return Stopped(ENDED, self.where())
         answer, done = self._answer(STEPPED, 0), 0
         for _ in range(max(count, 1)):
             answer = self._over_one()
@@ -346,6 +374,8 @@ class Session:
 
     def finish(self) -> Stopped:
         """Out of the call the run is inside - a guess (D21)."""
+        if self.ended:
+            return Stopped(ENDED, self.where())
         frames = self.calls.frames
         if not frames:
             return self._answer(NOTHING, 0)
@@ -361,10 +391,13 @@ class Session:
 
     def _carry_on(self, until: int | None = None, depth: int | None = None) -> Stopped:
         """The loop of a session: run until something it cares about happens."""
+        if self.ended:
+            return Stopped(ENDED, self.where())
         before = self.simulator.count
         places = self.addresses | ({until} if until is not None else set())
         while True:
-            stop = self.simulator.run(breakpoints=frozenset(places), watch=self._saw)
+            stop = self.simulator.run(max_steps=self.limit,
+                                      breakpoints=frozenset(places), watch=self._saw)
             done = self.simulator.count - before
             if self._touched:
                 return self._answer(WATCHPOINT, done)
@@ -387,6 +420,9 @@ class Session:
 
     def _ended(self, stop: Stop, steps: int) -> Stopped:
         reason = REASONS.get(stop.reason, PAUSED)
+        # A run that has exited, fallen off the end of its text or trapped with
+        # nowhere to go is over; one that waits, was paused or met its limit is not.
+        self.ended = reason in (EXITED, CLIFF, TRAPPED)
         touched = tuple(self._touched)
         self._touched.clear()
         return Stopped(reason, self.place_of(stop.address), steps, stop.message,
@@ -555,7 +591,7 @@ class Session:
         numbers = (range(32) if not names
                    else [self._register_number(name) for name in names])
         return [Value(X_NAMES[number], number, self.machine.x.read(number),
-                      self.options.xlen, f"x{number}") for number in numbers]
+                      self.options.xlen) for number in numbers]
 
     def floats(self, names: tuple[str, ...] = ()) -> list[Value]:
         """The floating point registers, with what the bits mean read both ways."""
@@ -564,10 +600,10 @@ class Session:
         found = []
         for number in numbers:
             raw = self.machine.f.raw(number)
-            about = f"f{number}: {to_text(raw, BINARY64)}"
+            about = to_text(raw, BINARY64)
             if raw >> 32 == 0xFFFFFFFF:  # a single lies boxed in a register
-                about = f"f{number}: {to_text(raw & 0xFFFFFFFF, BINARY32)} (single)"
-            found.append(Value(F_NAMES[number], number, raw, 64, about))
+                about = f"{to_text(raw & 0xFFFFFFFF, BINARY32)} (single)"
+            found.append(Value(F_NAMES[number], number, raw, 64, about, "f"))
         return found
 
     def csr(self, names: tuple[str, ...] = ()) -> list[Value]:
@@ -579,7 +615,7 @@ class Session:
                 raise ValueError(f'"{name}": no control register of that name')
             value = self.machine.csr.read(CSRS[name])
             found.append(Value(name, CSRS[name], value, self.options.xlen,
-                               _fields(name, value)))
+                               _fields(name, value), "csr"))
         return found
 
     def memory(self, low: int, high: int) -> list[Words]:

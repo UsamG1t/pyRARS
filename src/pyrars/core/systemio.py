@@ -115,6 +115,7 @@ class ConsoleIO:
         if end >= 0:  # a line the program has read before and read back
             line = self.taken[self.cursor:end + 1]
         else:
+            self._asked()
             line = self.taken[self.cursor:] + self.reader.readline()
             self.taken = self.taken[:self.cursor] + line
         self.cursor += len(line)
@@ -126,11 +127,21 @@ class ConsoleIO:
         hand it out again."""
         text = self.taken[self.cursor:self.cursor + count]
         if len(text) < count:
+            self._asked()
             more = self.reader.read(count - len(text))
             self.taken += more
             text += more
         self.cursor += len(text)
         return text
+
+    def _asked(self) -> None:
+        """The program is about to read something the world has not got yet.
+
+        Nothing happens here: it is for whoever shares a terminal with the program
+        and has to say whose turn it is to type (the console debugger does). It is
+        not called for what the program has read before and reads again after a
+        step back, because nothing is being asked of anyone then.
+        """
 
     # --------------------------------------------------------------- the files
 

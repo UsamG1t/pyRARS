@@ -34,6 +34,8 @@ from pyrars.analysis.pipeline import Pipeline
 from pyrars.analysis.pipeline import Settings as PipelineSettings
 from pyrars.analysis.stats import Statistics
 from pyrars.analysis.watchers import Watchers
+from pyrars.console import VALUE_FORMATS, Debugger, TerminalIO, value_text
+from pyrars.session.debug import Session
 from pyrars.devices import DeviceBus, make, names as device_names
 from pyrars.isa.classes import Kind
 from pyrars.isa.memory import CONFIGS, MemoryConfig
@@ -44,7 +46,6 @@ from pyrars.softfloat.text import to_text
 
 FORMATS = ("hex", "bin", "text")
 SEGMENTS = (".text", ".data")
-VALUE_FORMATS = ("hex", "dec", "ascii")
 
 # What the report says about each way a run can end; the address and the message
 # of a trap are added where they belong.
@@ -154,6 +155,25 @@ def _parser() -> argparse.ArgumentParser:
     run.add_argument("--args", nargs="*", default=[], metavar="ARG",
                      help="arguments of the program itself; comes last of all, because "
                           "everything after it belongs to the program")
+    run.add_argument("--debug-mode", action="store_true",
+                     help="debug the program at a console instead of running it; the "
+                          "commands are those of \"help\" at its prompt, and --steps "
+                          "then limits one movement of the session")
+    run.add_argument("--commands", metavar="FILE",
+                     help="obey the commands in this file before the prompt; a line "
+                          "may end with a comment after \"#\"")
+    # The name of the subcommand itself is kept in "command", so this one says
+    # where it goes rather than taking that place.
+    run.add_argument("-e", "--command", action="append", default=[], dest="asked",
+                     metavar="COMMAND",
+                     help="obey this command before the prompt; may be repeated, and "
+                          "comes after --commands")
+    run.add_argument("--program-input", metavar="FILE",
+                     help="the program reads from this file instead of the terminal it "
+                          "shares with the debugger")
+    run.add_argument("--program-output", metavar="FILE",
+                     help="the program writes to this file instead of the terminal it "
+                          "shares with the debugger")
     run.add_argument("-w", "--warnings-are-errors", action="store_true",
                      help="a warning makes the program fail")
     run.add_argument("--no-pseudo", action="store_true", help="forbid pseudo-instructions")
@@ -291,6 +311,18 @@ def _run(arguments, out, errors, reader) -> int:
     if program.failed:
         return 1
 
+    if arguments.debug_mode and (arguments.instruction_count or arguments.registers
+                                 or arguments.memory):
+        print("--debug-mode: a session prints what its own commands ask for, so -c, "
+              "--registers and --memory are for a plain run", file=errors)
+        return 1
+    if not arguments.debug_mode and (arguments.commands or arguments.asked
+                                     or arguments.program_input
+                                     or arguments.program_output):
+        print("--commands, -e, --program-input and --program-output belong to a "
+              "session: give --debug-mode as well", file=errors)
+        return 1
+
     try:
         breakpoints = frozenset(address(text) for text in arguments.breakpoints.split(",")
                                 if text)
@@ -307,6 +339,10 @@ def _run(arguments, out, errors, reader) -> int:
     except (ValueError, TypeError, OSError) as problem:
         print(problem, file=errors)
         return 1
+
+    if arguments.debug_mode:
+        return _debug(arguments, program, config, breakpoints, bus, afterwards,
+                      out, errors, reader)
 
     # A plain run keeps no journal: there is nobody to look at it (user decision
     # 2026-10-05); a debugging session asks for one.
@@ -335,7 +371,7 @@ def _run(arguments, out, errors, reader) -> int:
         print(f"instructions\t{simulator.count}", file=out)
     for name in names:
         value, bits = _register_value(machine, name)
-        print(f"{name}\t{_value(value, bits, arguments.format)}", file=out)
+        print(f"{name}\t{value_text(value, bits, arguments.format)}", file=out)
     for low, high in ranges:
         _memory(machine, low, high, arguments.format, out)
     if watchers:
@@ -343,6 +379,71 @@ def _run(arguments, out, errors, reader) -> int:
     if stop.reason is StopReason.EXCEPTION:
         return 1
     return stop.code
+
+
+def _debug(arguments, program: AssembledProgram, config: MemoryConfig,
+           breakpoints, bus, afterwards, out, errors, reader) -> int:
+    """Debug a program at a console: the session of `pyrars.session` behind the
+    front-end of `pyrars.console` (D21). RARS has nothing of this - it debugs in
+    its window only - so nothing here is held against it.
+    """
+    try:
+        caches, fetches = _caches(arguments.cache)
+        pipeline = _pipeline(arguments.pipeline, drawing=True)
+        script = _script(arguments)
+    except (ValueError, TypeError, OSError) as problem:
+        print(problem, file=errors)
+        return 1
+
+    closing = []
+    try:
+        speaking = out if arguments.program_output is None else _opened(
+            arguments.program_output, "w", closing)
+        listening = reader if arguments.program_input is None else _opened(
+            arguments.program_input, "r", closing)
+    except OSError as problem:
+        print(problem, file=errors)
+        return 1
+
+    world = TerminalIO(out=speaking, errors=errors, reader=listening)
+    session = Session(
+        program, RunOptions(xlen=arguments.xlen, config=config,
+                            self_modifying=arguments.self_modifying),
+        io=world, bus=bus, arguments=arguments.args, statistics=arguments.stats,
+        caches=caches, pipeline=pipeline, fetches=fetches, limit=arguments.steps)
+    for place in sorted(breakpoints):
+        session.add_break(place)
+
+    debugger = Debugger(session, out, errors, reader, echo=bool(script))
+    debugger.format = arguments.format
+    try:
+        debugger.script(script)
+        if debugger.going:
+            debugger.interact()
+    except KeyboardInterrupt:  # a session asked to stop while it stood at a prompt
+        print(file=out)
+    for finish in afterwards:
+        finish()
+    for file in closing:
+        file.close()
+    return debugger.code
+
+
+def _script(arguments) -> list[str]:
+    """The commands a session is to obey before its prompt: those of a file first,
+    then those of the command line, in the order they were given."""
+    lines = []
+    if arguments.commands is not None:
+        with open(arguments.commands) as file:
+            lines += file.read().splitlines()
+    return lines + list(arguments.asked)
+
+
+def _opened(path: str, mode: str, closing: list):
+    """A file of the program's own, to be closed when the session is over."""
+    file = open(path, mode)  # noqa: SIM115 - the session closes it
+    closing.append(file)
+    return file
 
 
 def _told(watchers: Watchers, program: AssembledProgram, out) -> None:
@@ -411,7 +512,7 @@ def _named(program: AssembledProgram, address: int) -> str:
 def _watchers(arguments, machine: Machine) -> Watchers:
     """The models a run was asked for, in the holder everything above the engine
     feeds (`analysis.watchers`)."""
-    caches, fetches = _caches(arguments.cache, machine)
+    caches, fetches = _caches(arguments.cache)
     watchers = Watchers(statistics=Statistics() if arguments.stats else None,
                         caches=caches, pipeline=_pipeline(arguments.pipeline),
                         callstack=CallStack() if arguments.callstack else None,
@@ -432,7 +533,7 @@ def _asked_of_a_cache(request: str) -> tuple[str, dict[str, object]]:
     return "data", _options(request, request)
 
 
-def _caches(requests: Sequence[str], machine: Machine):
+def _caches(requests: Sequence[str]):
     """The caches a run was asked for, and whether the fetches reach one.
 
     They watch the data segment of the memory. The area of the devices is never
@@ -462,14 +563,16 @@ def _caches(requests: Sequence[str], machine: Machine):
     return caches, fetches
 
 
-def _pipeline(request: str | None) -> Pipeline | None:
+def _pipeline(request: str | None, drawing: bool = False) -> Pipeline | None:
     """The pipeline a run was asked for, with its guesser."""
     if request is None:
         return None
     options = _options(request, f"--pipeline {request}")
-    # The command line draws no diagram unless it was asked for one: a run of a
-    # million instructions would bury everything else under it.
-    options.setdefault("diagram", 0)
+    # A plain run draws no diagram unless it was asked for one: a run of a million
+    # instructions would bury everything else under it. A session keeps one either
+    # way, because there `pipeline show` is a command and prints nothing by itself.
+    if not drawing:
+        options.setdefault("diagram", 0)
     latency = {}
     for which in Kind:
         name = which.name.lower()
@@ -678,34 +781,12 @@ def _number_of(name: str, letter: str, names: tuple[str, ...],
     return None
 
 
-def _value(value: int, bits: int, form: str) -> str:
-    """One value of `bits` bits, as the chosen format writes it. A register of a
-    64-bit machine therefore shows sixteen hexadecimal digits, where RARS prints
-    the low eight of any register (DEV-47); a word of memory is four bytes in both
-    widths."""
-    if form == "hex":
-        return f"0x{value:0{bits // 4}x}"
-    if form == "dec":
-        return str(value - (1 << bits) if value >> (bits - 1) else value)
-    return _ascii(value, bits // 8)
-
-
-def _ascii(value: int, width: int) -> str:
-    """The bytes of a value as characters, the highest first, each in three columns
-    and an unprintable one as a full stop - the way RARS writes them."""
-    letters = []
-    for index in reversed(range(width)):
-        byte = (value >> (8 * index)) & 0xFF
-        letters.append(f"{chr(byte) if 32 <= byte < 127 else '.':>3}")
-    return "".join(letters)
-
-
 def _memory(machine: Machine, low: int, high: int, form: str, out) -> None:
     """A range of memory, four words to a line, as RARS prints it."""
     addresses = range(low - low % 4, high + 1, 4)
     for start in range(0, len(addresses), 4):
         row = addresses[start:start + 4]
-        values = (_value(machine.memory.peek(place, 4), 32, form) for place in row)
+        values = (value_text(machine.memory.peek(place, 4), 32, form) for place in row)
         print(f"Mem[0x{row[0]:08x}]\t" + "\t".join(values), file=out)
 
 

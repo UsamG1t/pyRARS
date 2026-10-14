@@ -7,7 +7,7 @@ INV-L1 and INV-L2 of the architecture spec say which package may import which:
     L2  pyrars.devices, pyrars.analysis     -> L1, L0
     L1  pyrars.asm, pyrars.core             -> L0
     L0  pyrars.isa, pyrars.softfloat        -> stdlib only
-    aux pyrars.cli                          -> L3 (headless)
+    aux pyrars.cli, pyrars.console          -> L3 (headless)
 
 `pyrars.core` MUST NOT import the assembler: it consumes the plain data of
 `pyrars.isa.program`. Nothing except `pyrars.ui` may import GTK, so that
@@ -31,7 +31,8 @@ ALLOWED = {
     "analysis": {"analysis", "core", "asm", "isa", "softfloat"},
     "session": {"session", "devices", "analysis", "core", "asm", "isa", "softfloat"},
     "ui": {"ui", "session", "devices", "analysis", "core", "asm", "isa", "softfloat"},
-    "cli": {"cli", "session", "devices", "analysis", "core", "asm", "isa", "softfloat"},
+    "cli": {"cli", "console", "session", "devices", "analysis", "core", "asm", "isa",
+            "softfloat"},
 }
 
 
