@@ -110,3 +110,9 @@ class Model:
 
     def reset(self) -> None:
         """Back to the state of a machine just started."""
+
+    def state(self) -> dict[str, object]:
+        """What the device holds, for whoever shows it: a name to a value, in the
+        order a reader wants them. A device of someone else answers for itself, so
+        nothing that shows devices has to know any of them."""
+        return {}

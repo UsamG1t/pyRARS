@@ -16,6 +16,7 @@ from pyrars.core.executor import execute
 from pyrars.core.history import History, Kind
 from pyrars.core.machine import Machine
 from pyrars.core.options import Options
+from pyrars.core.simulator import Simulator
 from pyrars.core.systemio import ConsoleIO
 from pyrars.core.traps import Trap
 from pyrars.isa.codec import encode
@@ -487,3 +488,41 @@ def test_a_journal_of_its_own():
     """The journal is a plain object: a test may drive it without a machine."""
     history = History(depth=3)
     assert len(history) == 0 and history.rewind_world is False
+
+
+def test_a_step_back_does_not_undo_what_a_tool_wrote():
+    """A turn opens a step of the journal and closes it, so a place written
+    BETWEEN turns belongs to no step: a debugger that puts a value in a register
+    or in memory has it stand, whatever a step back does afterwards.
+
+    This is the rule of the journal from the decision of 2026-10-06: `set` and
+    `poke` are not steps of the machine and are not taken back with one.
+    """
+    m = machine(NOP, NOP, NOP, depth=10)
+    simulator = Simulator(m)
+    simulator.step()
+    simulator.step()
+
+    m.x.write(5, 7)  # what a tool does to a halted machine
+    m.memory.poke(DATA, 4, 0x11223344)
+    m.csr.poke("fcsr", 8)
+
+    assert simulator.back_step() is True
+    assert m.x.read(5) == 7
+    assert m.memory.peek(DATA, 4) == 0x11223344
+    assert m.csr.read(CSRS["fcsr"]) == 8
+    assert m.x.pc == TEXT + 4  # and the step itself was taken back
+
+
+def test_a_step_that_ends_in_a_stop_closes_its_step_too():
+    """However a turn ends - and running off the end of the text is one way - the
+    step it opened is closed, so nothing written afterwards falls into it."""
+    m = machine(NOP, depth=10)  # one instruction, then the cliff
+    simulator = Simulator(m)
+    simulator.step()
+    simulator.step()  # the cliff: a stop, with a step opened for it
+
+    m.x.write(6, 9)
+    while simulator.back_step():
+        pass
+    assert m.x.read(6) == 9

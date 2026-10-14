@@ -134,6 +134,15 @@ class DigitalLab(Model):
         self._poke(KEYBOARD_KEY, 0)
         self._changed()
 
+    def state(self) -> dict[str, object]:
+        return {
+            "left": f"0x{self.left:02x} ({' '.join(self.lit(self.left)) or 'dark'})",
+            "right": f"0x{self.right:02x} ({' '.join(self.lit(self.right)) or 'dark'})",
+            "key down": "none" if self.pressed is None else self.pressed,
+            "keys tell": self.key_interrupts,
+            "counter": "off" if not self.counter_on else f"{self.counter} to go",
+        }
+
     def lit(self, value: int) -> tuple[str, ...]:
         """Which segments a display holds, for whoever draws it."""
         return tuple(name for index, name in enumerate(SEGMENTS) if value >> index & 1)

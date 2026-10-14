@@ -106,6 +106,14 @@ class BitmapDisplay(Model):
 
     # --------------------------------------------------------- what a viewer does
 
+    def state(self) -> dict[str, object]:
+        painted = sum(1 for word in self.frame if word)
+        return {
+            "picture": f"0x{self.base:08x}, {self.columns} by {self.rows} units",
+            "unit": f"{self.unit_width} by {self.unit_height} pixels",
+            "painted": f"{painted} of {len(self.frame)}",
+        }
+
     def unit(self, column: int, row: int) -> int:
         """The word of one unit of the picture."""
         return self.frame[row * self.columns + column]

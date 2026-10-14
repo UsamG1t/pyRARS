@@ -26,7 +26,6 @@ from pyrars.asm.assembler import Options, assemble
 from pyrars.core.machine import Machine
 from pyrars.core.options import Options as RunOptions
 from pyrars.core.simulator import Simulator, Stop, StopReason
-from pyrars.core.memory import Access
 from pyrars.core.systemio import ConsoleIO
 from pyrars.analysis import cache as cache_model
 from pyrars.analysis import predictors
@@ -34,6 +33,10 @@ from pyrars.analysis.callstack import CallStack
 from pyrars.analysis.pipeline import Pipeline
 from pyrars.analysis.pipeline import Settings as PipelineSettings
 from pyrars.analysis.stats import Statistics
+from pyrars.analysis.watchers import Watchers
+from pyrars.console import VALUE_FORMATS, Debugger, TerminalIO, value_text
+from pyrars.session import project as projects
+from pyrars.session.debug import Session
 from pyrars.devices import DeviceBus, make, names as device_names
 from pyrars.isa.classes import Kind
 from pyrars.isa.memory import CONFIGS, MemoryConfig
@@ -44,7 +47,6 @@ from pyrars.softfloat.text import to_text
 
 FORMATS = ("hex", "bin", "text")
 SEGMENTS = (".text", ".data")
-VALUE_FORMATS = ("hex", "dec", "ascii")
 
 # What the report says about each way a run can end; the address and the message
 # of a trap are added where they belong.
@@ -110,10 +112,17 @@ def _parser() -> argparse.ArgumentParser:
                      help='the entry point is the label "main" if there is one')
 
     run = commands.add_parser("run", help="assemble and run a program")
-    run.add_argument("files", nargs="+", help="source files of one program")
-    run.add_argument("-x", "--xlen", type=int, choices=(32, 64), default=32,
+    run.add_argument("files", nargs="*", help="source files of one program")
+    run.add_argument("--project", metavar="FILE",
+                     help="read what the program IS from a project file: its files, "
+                          "its main file, the width of the machine, the memory "
+                          "configuration and whether pseudo-instructions are allowed. "
+                          "What it settles cannot be given again on the line")
+    # Both of these say nothing by default, so that a project can be told from a
+    # flag: what a project settles may not be given twice.
+    run.add_argument("-x", "--xlen", type=int, choices=(32, 64), default=None,
                      help="width of the registers (default: 32)")
-    run.add_argument("-m", "--mem-config", choices=tuple(CONFIGS), default="Default",
+    run.add_argument("-m", "--mem-config", choices=tuple(CONFIGS), default=None,
                      help="memory configuration (default: Default)")
     run.add_argument("--self-modifying", action="store_true",
                      help="let the program read and write its own text")
@@ -154,6 +163,25 @@ def _parser() -> argparse.ArgumentParser:
     run.add_argument("--args", nargs="*", default=[], metavar="ARG",
                      help="arguments of the program itself; comes last of all, because "
                           "everything after it belongs to the program")
+    run.add_argument("--debug-mode", action="store_true",
+                     help="debug the program at a console instead of running it; the "
+                          "commands are those of \"help\" at its prompt, and --steps "
+                          "then limits one movement of the session")
+    run.add_argument("--commands", metavar="FILE",
+                     help="obey the commands in this file before the prompt; a line "
+                          "may end with a comment after \"#\"")
+    # The name of the subcommand itself is kept in "command", so this one says
+    # where it goes rather than taking that place.
+    run.add_argument("-e", "--command", action="append", default=[], dest="asked",
+                     metavar="COMMAND",
+                     help="obey this command before the prompt; may be repeated, and "
+                          "comes after --commands")
+    run.add_argument("--program-input", metavar="FILE",
+                     help="the program reads from this file instead of the terminal it "
+                          "shares with the debugger")
+    run.add_argument("--program-output", metavar="FILE",
+                     help="the program writes to this file instead of the terminal it "
+                          "shares with the debugger")
     run.add_argument("-w", "--warnings-are-errors", action="store_true",
                      help="a warning makes the program fail")
     run.add_argument("--no-pseudo", action="store_true", help="forbid pseudo-instructions")
@@ -281,6 +309,11 @@ def _text_lines(program: AssembledProgram, segment: str) -> list[str]:
 def _run(arguments, out, errors, reader) -> int:
     """Assemble a program and run it. The program writes to the same streams and
     reads from the same input as the command line itself."""
+    try:
+        _settled(arguments)
+    except ValueError as problem:
+        print(problem, file=errors)
+        return 1
     config = CONFIGS[arguments.mem_config]
     program = assemble(arguments.files, Options(
         xlen=arguments.xlen, config=config, pseudo=not arguments.no_pseudo,
@@ -289,6 +322,18 @@ def _run(arguments, out, errors, reader) -> int:
     for diagnostic in program.diagnostics:
         print(_message(diagnostic), file=errors)
     if program.failed:
+        return 1
+
+    if arguments.debug_mode and (arguments.instruction_count or arguments.registers
+                                 or arguments.memory):
+        print("--debug-mode: a session prints what its own commands ask for, so -c, "
+              "--registers and --memory are for a plain run", file=errors)
+        return 1
+    if not arguments.debug_mode and (arguments.commands or arguments.asked
+                                     or arguments.program_input
+                                     or arguments.program_output):
+        print("--commands, -e, --program-input and --program-output belong to a "
+              "session: give --debug-mode as well", file=errors)
         return 1
 
     try:
@@ -307,6 +352,10 @@ def _run(arguments, out, errors, reader) -> int:
     except (ValueError, TypeError, OSError) as problem:
         print(problem, file=errors)
         return 1
+
+    if arguments.debug_mode:
+        return _debug(arguments, program, config, breakpoints, bus, afterwards,
+                      out, errors, reader)
 
     # A plain run keeps no journal: there is nobody to look at it (user decision
     # 2026-10-05); a debugging session asks for one.
@@ -335,88 +384,169 @@ def _run(arguments, out, errors, reader) -> int:
         print(f"instructions\t{simulator.count}", file=out)
     for name in names:
         value, bits = _register_value(machine, name)
-        print(f"{name}\t{_value(value, bits, arguments.format)}", file=out)
+        print(f"{name}\t{value_text(value, bits, arguments.format)}", file=out)
     for low, high in ranges:
         _memory(machine, low, high, arguments.format, out)
     if watchers:
-        watchers.told(program, out)
+        _told(watchers, program, out)
     if stop.reason is StopReason.EXCEPTION:
         return 1
     return stop.code
 
 
-class Watchers:
-    """The models of `pyrars.analysis` a run was asked for.
+def _settled(arguments) -> None:
+    """What the program is: from a project file, or from the line itself.
 
-    They are handed what the run did - every turn from the loop, and the accesses
-    of memory through a subscription - and they touch nothing of it (INV-P).
+    A project settles the files, the main file, the width of the machine, the
+    memory configuration and the pseudo-instructions, so none of those may be
+    given on the line as well - a flag that quietly loses to a file, or wins over
+    it, is worse than a refusal. What it does not settle - the devices, the
+    models, the breakpoints, how much to print - is given on the line as ever.
     """
+    if arguments.project is None:
+        if not arguments.files:
+            raise ValueError("name the files of the program, or --project FILE")
+        arguments.xlen = 32 if arguments.xlen is None else arguments.xlen
+        arguments.mem_config = ("Default" if arguments.mem_config is None
+                                else arguments.mem_config)
+        return
+    given = [name for name, value in (("the files", arguments.files),
+                                      ("-x", arguments.xlen is not None),
+                                      ("-m", arguments.mem_config is not None),
+                                      ("--no-pseudo", arguments.no_pseudo)) if value]
+    if given:
+        raise ValueError(f"--project settles what the program is, so {_listed(given)} "
+                         "cannot be given as well")
+    project = projects.read(arguments.project)
+    if not project.files:
+        raise ValueError(f"{arguments.project}: the project names no files")
+    arguments.files = list(project.paths)
+    arguments.xlen = project.xlen
+    arguments.mem_config = project.mem_config
+    arguments.no_pseudo = not project.pseudo
 
-    def __init__(self, arguments, machine: Machine) -> None:
-        self.statistics = Statistics() if arguments.stats else None
-        self.caches, self.fetches = _caches(arguments.cache, machine)
-        self.pipeline = _pipeline(arguments.pipeline)
-        self.callstack = CallStack() if arguments.callstack else None
-        self.machine = machine
 
-    def __bool__(self) -> bool:
-        return any((self.statistics, self.caches, self.pipeline, self.callstack))
+def _listed(names: Sequence[str]) -> str:
+    """Several things named in a sentence, the last one after an "and"."""
+    if len(names) == 1:
+        return names[0]
+    return ", ".join(names[:-1]) + " and " + names[-1]
 
-    def saw(self, turn) -> None:
-        """One turn of the loop."""
-        if self.statistics is not None:
-            self.statistics.saw(turn)
-        if self.pipeline is not None:
-            self.pipeline.saw(turn)
-        if self.callstack is not None:
-            self.callstack.saw(turn, sp=self.machine.x.read(2))
-        if self.fetches:
-            self.caches.fetch(turn.pc)
 
-    def told(self, program: AssembledProgram, out) -> None:
-        """What the models have to say, one `name<tab>value` to a line."""
-        if self.statistics is not None:
-            _said(out, "instructions", self.statistics.instructions)
-            _said(out, "turns", self.statistics.turns)
-            for name, many in self.statistics.kinds().items():
-                _said(out, f"kind.{name}", many)
-            for name, many in self.statistics.categories().items():
-                _said(out, f"category.{name.lower()}", many)
-            if self.statistics.by_kind.get(Kind.BRANCH):
-                _said(out, "branches.taken", self.statistics.taken)
-                _said(out, "branches.not-taken", self.statistics.not_taken)
-        if self.caches is not None:
-            for side, cache in self.caches.each().items():
-                for name, value in (("accesses", cache.accesses), ("hits", cache.hits),
-                                    ("misses", cache.misses),
-                                    ("rate", round(cache.hit_rate, 4)),
-                                    ("writebacks", cache.writebacks),
-                                    ("through", cache.through)):
-                    _said(out, f"{side}.{name}", value)
-        if self.pipeline is not None:
-            _said(out, "pipeline.cycles", self.pipeline.cycles)
-            _said(out, "pipeline.instructions", self.pipeline.instructions)
-            _said(out, "pipeline.cpi", round(self.pipeline.cpi, 4))
-            _said(out, "pipeline.lost", self.pipeline.lost)
-            for cause, many in sorted(self.pipeline.stalls.items()):
-                _said(out, f"pipeline.lost.{cause}", many)
-            _said(out, "pipeline.branches", self.pipeline.branches)
-            _said(out, "pipeline.wrong", self.pipeline.mispredictions)
-            _said(out, "pipeline.guesser", self.pipeline.predictor.name)
-            for row in self.pipeline.diagram:
-                stages = " ".join(str(cycle) for cycle in row.starts)
-                print(f"pipeline.row\t0x{row.pc:08x}\t{row.mnemonic}\t{stages}", file=out)
-        if self.callstack is not None:
-            stack = self.callstack
-            for name, value in (("calls", stack.calls), ("returns", stack.returns),
-                                ("deepest", stack.deepest), ("depth", stack.depth),
-                                ("unmatched", stack.unmatched),
-                                ("confused", stack.confused), ("beyond", stack.beyond)):
-                _said(out, f"callstack.{name}", value)
-            for frame in stack.frames:
-                where = "?" if frame.sp is None else f"0x{frame.sp:08x}"
-                print(f"callstack.frame\t{_named(program, frame.called)}\t"
-                      f"0x{frame.called_from:08x}\t{where}", file=out)
+def _debug(arguments, program: AssembledProgram, config: MemoryConfig,
+           breakpoints, bus, afterwards, out, errors, reader) -> int:
+    """Debug a program at a console: the session of `pyrars.session` behind the
+    front-end of `pyrars.console` (D21). RARS has nothing of this - it debugs in
+    its window only - so nothing here is held against it.
+    """
+    try:
+        caches, fetches = _caches(arguments.cache)
+        pipeline = _pipeline(arguments.pipeline, drawing=True)
+        script = _script(arguments)
+    except (ValueError, TypeError, OSError) as problem:
+        print(problem, file=errors)
+        return 1
+
+    closing = []
+    try:
+        speaking = out if arguments.program_output is None else _opened(
+            arguments.program_output, "w", closing)
+        listening = reader if arguments.program_input is None else _opened(
+            arguments.program_input, "r", closing)
+    except OSError as problem:
+        print(problem, file=errors)
+        return 1
+
+    world = TerminalIO(out=speaking, errors=errors, reader=listening)
+    session = Session(
+        program, RunOptions(xlen=arguments.xlen, config=config,
+                            self_modifying=arguments.self_modifying),
+        io=world, bus=bus, arguments=arguments.args, statistics=arguments.stats,
+        caches=caches, pipeline=pipeline, fetches=fetches, limit=arguments.steps)
+    for place in sorted(breakpoints):
+        session.add_break(place)
+
+    debugger = Debugger(session, out, errors, reader, echo=bool(script))
+    debugger.format = arguments.format
+    try:
+        debugger.script(script)
+        if debugger.going:
+            debugger.interact()
+    except KeyboardInterrupt:  # a session asked to stop while it stood at a prompt
+        print(file=out)
+    for finish in afterwards:
+        finish()
+    for file in closing:
+        file.close()
+    return debugger.code
+
+
+def _script(arguments) -> list[str]:
+    """The commands a session is to obey before its prompt: those of a file first,
+    then those of the command line, in the order they were given."""
+    lines = []
+    if arguments.commands is not None:
+        with open(arguments.commands) as file:
+            lines += file.read().splitlines()
+    return lines + list(arguments.asked)
+
+
+def _opened(path: str, mode: str, closing: list):
+    """A file of the program's own, to be closed when the session is over."""
+    file = open(path, mode)  # noqa: SIM115 - the session closes it
+    closing.append(file)
+    return file
+
+
+def _told(watchers: Watchers, program: AssembledProgram, out) -> None:
+    """What the models have to say, one `name<tab>value` to a line.
+
+    The models themselves are held and fed by `analysis.watchers.Watchers`, which
+    the window of a session uses too; what belongs to the command line is only
+    this, the turning of what they counted into lines for a terminal.
+    """
+    if watchers.statistics is not None:
+        _said(out, "instructions", watchers.statistics.instructions)
+        _said(out, "turns", watchers.statistics.turns)
+        for name, many in watchers.statistics.kinds().items():
+            _said(out, f"kind.{name}", many)
+        for name, many in watchers.statistics.categories().items():
+            _said(out, f"category.{name.lower()}", many)
+        if watchers.statistics.by_kind.get(Kind.BRANCH):
+            _said(out, "branches.taken", watchers.statistics.taken)
+            _said(out, "branches.not-taken", watchers.statistics.not_taken)
+    if watchers.caches is not None:
+        for side, cache in watchers.caches.each().items():
+            for name, value in (("accesses", cache.accesses), ("hits", cache.hits),
+                                ("misses", cache.misses),
+                                ("rate", round(cache.hit_rate, 4)),
+                                ("writebacks", cache.writebacks),
+                                ("through", cache.through)):
+                _said(out, f"{side}.{name}", value)
+    if watchers.pipeline is not None:
+        _said(out, "pipeline.cycles", watchers.pipeline.cycles)
+        _said(out, "pipeline.instructions", watchers.pipeline.instructions)
+        _said(out, "pipeline.cpi", round(watchers.pipeline.cpi, 4))
+        _said(out, "pipeline.lost", watchers.pipeline.lost)
+        for cause, many in sorted(watchers.pipeline.stalls.items()):
+            _said(out, f"pipeline.lost.{cause}", many)
+        _said(out, "pipeline.branches", watchers.pipeline.branches)
+        _said(out, "pipeline.wrong", watchers.pipeline.mispredictions)
+        _said(out, "pipeline.guesser", watchers.pipeline.predictor.name)
+        for row in watchers.pipeline.diagram:
+            stages = " ".join(str(cycle) for cycle in row.starts)
+            print(f"pipeline.row\t0x{row.pc:08x}\t{row.mnemonic}\t{stages}", file=out)
+    if watchers.callstack is not None:
+        stack = watchers.callstack
+        for name, value in (("calls", stack.calls), ("returns", stack.returns),
+                            ("deepest", stack.deepest), ("depth", stack.depth),
+                            ("unmatched", stack.unmatched),
+                            ("confused", stack.confused), ("beyond", stack.beyond)):
+            _said(out, f"callstack.{name}", value)
+        for frame in stack.frames:
+            where = "?" if frame.sp is None else f"0x{frame.sp:08x}"
+            print(f"callstack.frame\t{_named(program, frame.called)}\t"
+                  f"0x{frame.called_from:08x}\t{where}", file=out)
 
 
 def _said(out, name: str, value) -> None:
@@ -432,7 +562,15 @@ def _named(program: AssembledProgram, address: int) -> str:
 
 
 def _watchers(arguments, machine: Machine) -> Watchers:
-    return Watchers(arguments, machine)
+    """The models a run was asked for, in the holder everything above the engine
+    feeds (`analysis.watchers`)."""
+    caches, fetches = _caches(arguments.cache)
+    watchers = Watchers(statistics=Statistics() if arguments.stats else None,
+                        caches=caches, pipeline=_pipeline(arguments.pipeline),
+                        callstack=CallStack() if arguments.callstack else None,
+                        fetches=fetches, machine=machine)
+    watchers.listen()  # the accesses of memory, which do not come with a turn
+    return watchers
 
 
 CACHE_SIDES = ("data", "instructions", "unified")
@@ -447,7 +585,7 @@ def _asked_of_a_cache(request: str) -> tuple[str, dict[str, object]]:
     return "data", _options(request, request)
 
 
-def _caches(requests: Sequence[str], machine: Machine):
+def _caches(requests: Sequence[str]):
     """The caches a run was asked for, and whether the fetches reach one.
 
     They watch the data segment of the memory. The area of the devices is never
@@ -474,22 +612,19 @@ def _caches(requests: Sequence[str], machine: Machine):
         caches = cache_model.Caches(data=sides.get("data", cache_model.Settings()),
                                     instructions=sides.get("instructions"))
         fetches = caches.split
-    config = machine.options.config
-    machine.memory.subscribe(Access.READ, lambda access: caches.read(access.address),
-                             config.data_segment_base, config.data_segment_limit)
-    machine.memory.subscribe(Access.WRITE, lambda access: caches.write(access.address),
-                             config.data_segment_base, config.data_segment_limit)
     return caches, fetches
 
 
-def _pipeline(request: str | None) -> Pipeline | None:
+def _pipeline(request: str | None, drawing: bool = False) -> Pipeline | None:
     """The pipeline a run was asked for, with its guesser."""
     if request is None:
         return None
     options = _options(request, f"--pipeline {request}")
-    # The command line draws no diagram unless it was asked for one: a run of a
-    # million instructions would bury everything else under it.
-    options.setdefault("diagram", 0)
+    # A plain run draws no diagram unless it was asked for one: a run of a million
+    # instructions would bury everything else under it. A session keeps one either
+    # way, because there `pipeline show` is a command and prints nothing by itself.
+    if not drawing:
+        options.setdefault("diagram", 0)
     latency = {}
     for which in Kind:
         name = which.name.lower()
@@ -698,34 +833,12 @@ def _number_of(name: str, letter: str, names: tuple[str, ...],
     return None
 
 
-def _value(value: int, bits: int, form: str) -> str:
-    """One value of `bits` bits, as the chosen format writes it. A register of a
-    64-bit machine therefore shows sixteen hexadecimal digits, where RARS prints
-    the low eight of any register (DEV-47); a word of memory is four bytes in both
-    widths."""
-    if form == "hex":
-        return f"0x{value:0{bits // 4}x}"
-    if form == "dec":
-        return str(value - (1 << bits) if value >> (bits - 1) else value)
-    return _ascii(value, bits // 8)
-
-
-def _ascii(value: int, width: int) -> str:
-    """The bytes of a value as characters, the highest first, each in three columns
-    and an unprintable one as a full stop - the way RARS writes them."""
-    letters = []
-    for index in reversed(range(width)):
-        byte = (value >> (8 * index)) & 0xFF
-        letters.append(f"{chr(byte) if 32 <= byte < 127 else '.':>3}")
-    return "".join(letters)
-
-
 def _memory(machine: Machine, low: int, high: int, form: str, out) -> None:
     """A range of memory, four words to a line, as RARS prints it."""
     addresses = range(low - low % 4, high + 1, 4)
     for start in range(0, len(addresses), 4):
         row = addresses[start:start + 4]
-        values = (_value(machine.memory.peek(place, 4), 32, form) for place in row)
+        values = (value_text(machine.memory.peek(place, 4), 32, form) for place in row)
         print(f"Mem[0x{row[0]:08x}]\t" + "\t".join(values), file=out)
 
 

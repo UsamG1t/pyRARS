@@ -160,6 +160,18 @@ class DirectAccess(Model):
         self.connection.memory.poke(
             self.connection.config.mmio_base + register_, 4, value)
 
+    def state(self) -> dict[str, object]:
+        return {
+            "speed": f"{self.speed} word{'s' if self.speed != 1 else ''}"
+                     " an instruction",
+            "copying": self.busy,
+            "from": f"0x{self.source:08x}",
+            "to": f"0x{self.target:08x}",
+            "words left": self.left,
+            "words copied": self.copied,
+            "refused": self.error,
+        }
+
     def subscribe(self, callback: Callable[[], None]) -> Callable[[], None]:
         self.watchers.append(callback)
 

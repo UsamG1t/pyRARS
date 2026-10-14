@@ -48,6 +48,12 @@ class Statistics:
             else:
                 self.taken += 1
 
+    def reset(self) -> None:
+        """Forget the run counted so far."""
+        self.turns = self.instructions = self.traps = self.unknown = 0
+        self.taken = self.not_taken = 0
+        self.by_kind.clear()
+
     def categories(self) -> dict[str, int]:
         """The five kinds RARS counts by, in its own order."""
         counted = dict.fromkeys(("ALU", "Jump", "Branch", "Memory", "Other"), 0)

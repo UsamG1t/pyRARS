@@ -93,6 +93,15 @@ class Timer(Model):
         time is counted in instructions and a run must repeat (INV-D)."""
         return 0 if self.mode == "virtual" else self.connection.clock()
 
+    def state(self) -> dict[str, object]:
+        return {
+            "clock": self.mode + ("" if self.mode == "wall" else f" ({self.step} ms an instruction)"),
+            "running": self.running,
+            "time": self.time(),
+            "asked for": self.timecmp,
+            "armed": self.armed,
+        }
+
     def play(self) -> None:
         """Let the time run on, from where it stopped."""
         if self.running:

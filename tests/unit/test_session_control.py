@@ -1,0 +1,562 @@
+"""Driving a run from a thread of its own: what comes back, and from where.
+
+RARS has nothing to compare this with - its own window and its simulator thread
+are one piece of Java - so every expected value here is worked out from what the
+controller PROMISES: one thread carries everything out, what comes back is the
+data of a session, a snapshot goes out no oftener than it was asked to, and the
+two things that cannot wait for the queue (pause, stop) are the only ones that do
+not.
+
+No test here may hang, whatever goes wrong (the lesson of stage 24): every wait
+has a timeout and every wait is asserted.
+"""
+
+import io
+import threading
+import time
+
+import pytest
+
+from pyrars.session import project as projects
+from pyrars.session.control import (
+    ASKING, ENDED, LOAD, NOTHING, RUNNING, STANDING, Answer, Failed, RunController,
+    Snapshot, Waiting)
+
+SUM = """\
+.globl main
+.data
+total:  .word 0
+.text
+main:   li t0, 3
+        li t1, 0
+loop:   add t1, t1, t0
+        addi t0, t0, -1
+        bne t0, x0, loop
+        jal ra, keep
+        li a7, 93
+        li a0, 0
+        ecall
+keep:   la t0, total
+        sw t1, 0(t0)
+        ret
+"""
+FOREVER = """\
+.globl main
+.text
+main:   li t0, 0
+loop:   addi t0, t0, 1
+        j loop
+"""
+ASKS = """\
+.globl main
+.data
+buffer: .space 32
+.text
+main:   li a7, 8
+        la a0, buffer
+        li a1, 32
+        ecall
+        li a7, 93
+        li a0, 0
+        ecall
+"""
+BROKEN = ".text\nmain: nonsense t0, t1\n"
+
+# Two to set up, three to a turn of the loop three times over, the call, the two
+# halves of `la` with the store and the return, and two before the exit; the
+# `ecall` that ends the run does not count.
+WHOLE = 2 + 3 * 3 + 1 + 4 + 2
+
+
+def project(tmp_path, source: str = SUM):
+    (tmp_path / "main.s").write_text(source)
+    return projects.of([str(tmp_path / "main.s")], folder=str(tmp_path))
+
+
+def waited_for(whether, timeout: float = 5.0) -> bool:
+    """Wait for something to become true, and say whether it did. Nothing here
+    waits for ever, however badly the thing being tested behaves."""
+    end = time.monotonic() + timeout
+    while time.monotonic() < end:
+        if whether():
+            return True
+        time.sleep(0.001)
+    return False
+
+
+class Told:
+    """What the controller told us, in the order it told us."""
+
+    def __init__(self) -> None:
+        self.events: list[object] = []
+        self.threads: set[int] = set()
+        self._lock = threading.Lock()
+
+    def __call__(self, event) -> None:
+        with self._lock:
+            self.events.append(event)
+            self.threads.add(threading.get_ident())
+
+    @property
+    def snapshots(self) -> list[Snapshot]:
+        return [one for one in self.events if isinstance(one, Snapshot)]
+
+    @property
+    def answers(self) -> list[Answer]:
+        return [one for one in self.events if isinstance(one, Answer)]
+
+    @property
+    def failures(self) -> list[Failed]:
+        return [one for one in self.events if isinstance(one, Failed)]
+
+    @property
+    def last(self) -> Snapshot:
+        return self.snapshots[-1]
+
+
+@pytest.fixture
+def told():
+    return Told()
+
+
+@pytest.fixture
+def control(told):
+    """A controller over a world that writes into a string, closed afterwards
+    however the test ends."""
+    made = RunController(told, out=io.StringIO(), errors=io.StringIO())
+    yield made
+    made.close()
+
+
+def opened(control, tmp_path, source: str = SUM, **kept) -> None:
+    control.load(project(tmp_path, source), **kept)
+    assert control.settled()
+
+
+# -------------------------------------------------------------- opening a program
+
+
+def test_nothing_is_open_to_begin_with(control, told):
+    assert control.state == NOTHING
+    assert told.events == []
+
+
+def test_a_program_opened(control, told, tmp_path):
+    opened(control, tmp_path)
+    assert [one.what for one in told.answers] == [LOAD]
+    assert told.answers[0].value.failed is False
+    assert told.last.state == STANDING
+    assert told.last.place.symbol == "main"
+    assert (told.last.instructions, told.last.back) == (0, 0)
+
+
+def test_a_program_that_cannot_be_assembled(control, told, tmp_path):
+    opened(control, tmp_path, BROKEN)
+    program = told.answers[0].value
+    assert program.failed is True
+    assert program.diagnostics  # and the window has them to show
+    assert control.state == NOTHING
+    assert told.snapshots == []  # there is nothing to take a picture of
+
+
+def test_a_question_with_nothing_open(control, told):
+    control.ask("where", lambda session: session.where())
+    assert control.settled()
+    assert told.failures == [Failed("where", "no program is open")]
+
+
+# ---------------------------------------------------------------- the movement
+
+
+def test_a_step(control, told, tmp_path):
+    opened(control, tmp_path)
+    control.step(3)
+    assert control.settled()
+    assert told.last.stopped.reason == "stepped"
+    assert told.last.stopped.steps == 3
+    assert (told.last.instructions, told.last.back) == (3, 3)
+    assert told.last.state == STANDING
+
+
+def test_every_movement_ends_in_a_snapshot_of_its_own(control, told, tmp_path):
+    opened(control, tmp_path)
+    control.step(2)
+    control.over()
+    control.back()
+    control.until(0x00400018)
+    control.restart()
+    assert control.settled()
+    assert [one.stopped.reason for one in told.snapshots if one.stopped] == [
+        "stepped", "stepped", "stepped", "stepped", "nothing"]
+    assert told.last.instructions == 0  # the restart put the run back to nothing
+
+
+def test_a_run_to_its_end(control, told, tmp_path):
+    opened(control, tmp_path)
+    control.carry_on()
+    assert control.settled()
+    assert told.last.stopped.reason == "exited"
+    assert told.last.stopped.steps == WHOLE
+    assert told.last.state == ENDED
+
+
+def test_a_movement_after_the_run_has_ended(control, told, tmp_path):
+    opened(control, tmp_path)
+    control.carry_on()
+    control.step()
+    assert control.settled()
+    assert told.last.stopped.reason == "ended"
+
+
+def test_the_order_asked_is_the_order_done(control, told, tmp_path):
+    opened(control, tmp_path)
+    control.step()
+    control.ask("first", lambda session: session.count().instructions)
+    control.step(4)
+    control.ask("second", lambda session: session.count().instructions)
+    assert control.settled()
+    assert [(one.what, one.value) for one in told.answers[1:]] == [
+        ("first", 1), ("second", 5)]
+
+
+# ------------------------------------------------------------- what is asked for
+
+
+def test_a_question_is_answered_with_the_data_of_a_session(control, told, tmp_path):
+    opened(control, tmp_path)
+    control.step(2)
+    control.ask("registers", lambda session: session.registers(("t0", "t1")))
+    assert control.settled()
+    answer = told.answers[-1]
+    assert answer.what == "registers"
+    assert [(one.name, one.value) for one in answer.value] == [("t0", 3), ("t1", 0)]
+
+
+def test_a_question_that_changes_something(control, told, tmp_path):
+    """Everything a session can do is a question here, the changes among them: a
+    window has no other way in, and this module grows no method for each."""
+    opened(control, tmp_path)
+    control.ask("break", lambda session: session.add_break(0x00400018))
+    control.carry_on()
+    assert control.settled()
+    assert told.answers[-1].value.id == 1
+    assert told.last.stopped.reason == "breakpoint"
+
+
+def test_a_question_that_cannot_be_answered(control, told, tmp_path):
+    opened(control, tmp_path)
+    control.ask("nonsense", lambda session: session.registers(("t9",)))
+    assert control.settled()
+    assert told.failures == [Failed("nonsense", '"t9": no register of that name')]
+    # and the controller lives on
+    control.step()
+    assert control.settled()
+    assert told.last.stopped.reason == "stepped"
+
+
+def test_a_question_that_fails_without_a_word_to_say(control, told, tmp_path):
+    opened(control, tmp_path)
+    control.ask("nothing", lambda session: 1 / 0)
+    assert control.settled()
+    assert told.failures[0].message  # the kind of it, where there is no message
+    assert "zero" in told.failures[0].message
+
+
+# --------------------------------------------------- what does not wait in line
+
+
+def test_a_program_without_an_end_is_paused_from_outside(control, told, tmp_path):
+    opened(control, tmp_path, FOREVER)
+    control.carry_on()
+    assert waited_for(lambda: any(one.state == RUNNING for one in told.snapshots))
+    control.pause()
+    assert control.settled()
+    assert told.last.stopped.reason == "paused"
+    assert told.last.state == STANDING  # it stands, and the run may go on
+    assert told.last.instructions > 0
+
+
+def test_a_paused_run_carries_on(control, told, tmp_path):
+    opened(control, tmp_path, FOREVER)
+    control.carry_on()
+    assert waited_for(lambda: any(one.state == RUNNING for one in told.snapshots))
+    control.pause()
+    assert control.settled()
+    far = told.last.instructions
+    control.carry_on()
+    assert waited_for(lambda: told.last.instructions > far)
+    control.pause()
+    assert control.settled()
+    assert told.last.instructions > far
+
+
+def test_a_run_told_to_stop_is_over(control, told, tmp_path):
+    """`pause` lets the machine stand and the run go on; `stop` is the end of that
+    run, as it is in RARS, and a restart is what follows."""
+    opened(control, tmp_path, FOREVER)
+    control.carry_on()
+    assert waited_for(lambda: any(one.state == RUNNING for one in told.snapshots))
+    control.stop()
+    assert control.settled()
+    assert told.last.state == ENDED
+    control.step()
+    assert control.settled()
+    assert told.last.stopped.reason == "ended"
+    control.restart()
+    assert control.settled()
+    assert told.last.state == STANDING  # and a restart brings it back
+
+
+def test_a_step_back_reaches_over_a_run_that_was_stopped(control, told, tmp_path):
+    opened(control, tmp_path)
+    control.carry_on()
+    control.back(2)
+    control.step()
+    assert control.settled()
+    assert told.last.stopped.reason == "stepped"
+
+
+# ------------------------------------------------------------- the snapshots
+
+
+def test_a_snapshot_goes_out_no_oftener_than_it_was_asked_to(told, tmp_path):
+    """Thirty a second is what a window asks for; a test asks for one an hour and
+    for one a turn, which is the same comparison answered both ways."""
+    with RunController(told, out=io.StringIO(), every=3600) as control:
+        opened(control, tmp_path)
+        control.step(10)
+        assert control.settled()
+    while_running = [one for one in told.snapshots if one.state == RUNNING]
+    assert len(while_running) == 1  # the first turn, and then not again for an hour
+
+    often = Told()
+    with RunController(often, out=io.StringIO(), every=0) as control:
+        opened(control, tmp_path)
+        control.step(10)
+        assert control.settled()
+    assert len([one for one in often.snapshots if one.state == RUNNING]) == 10
+
+
+def test_every_movement_says_at_once_that_it_is_running(told, tmp_path):
+    """However seldom snapshots go out, each movement says where it is as it
+    begins: a window that was told to carry on must not look as if nothing
+    happened until the next snapshot is due."""
+    with RunController(told, out=io.StringIO(), every=3600) as control:
+        opened(control, tmp_path)
+        control.step(3)
+        control.step(3)
+        control.step(3)
+        assert control.settled()
+    assert len([one for one in told.snapshots if one.state == RUNNING]) == 3
+
+
+def test_a_snapshot_asked_for(control, told, tmp_path):
+    """A window that has just been opened asks where things are, and is told -
+    whether anything is open or not."""
+    control.look()
+    assert control.settled()
+    assert told.snapshots == [Snapshot(NOTHING)]
+    opened(control, tmp_path)
+    control.step(2)
+    control.look()
+    assert control.settled()
+    assert told.last.state == STANDING
+    assert told.last.instructions == 2
+    assert told.last.stopped is None  # nothing moved: it is only a picture
+
+
+def test_a_snapshot_holds_what_is_wanted_at_every_moment(control, told, tmp_path):
+    opened(control, tmp_path)
+    control.step(5)
+    assert control.settled()
+    shot = told.last
+    assert shot.place.basic and shot.place.source  # where the machine stands
+    assert (shot.instructions, shot.back) == (5, 5)
+    assert shot.turns == 0  # no statistics were asked for
+    assert shot.state == STANDING
+
+
+def test_the_models_a_controller_was_asked_for(control, told, tmp_path):
+    """What a session is built with is handed to it here, so a window asks for the
+    models the same way the command line does."""
+    opened(control, tmp_path, statistics=True)
+    control.carry_on()
+    control.ask("stats", lambda session: session.models.statistics.instructions)
+    assert control.settled()
+    # the turn that ended the run reached no model: it did nothing to count
+    assert told.last.turns == WHOLE
+    assert told.answers[-1].value == WHOLE
+
+
+# ------------------------------------------------------------------ one thread
+
+
+def test_everything_happens_in_one_thread_and_not_the_one_that_asked(control, told,
+                                                                     tmp_path):
+    """INV-T: nothing but the thread of the run touches the machine or the session
+    around it. Every event comes from that thread, and so does every question."""
+    opened(control, tmp_path)
+    asking = threading.get_ident()
+    seen: list[int] = []
+    control.ask("thread", lambda session: seen.append(threading.get_ident()))
+    control.step(3)
+    control.carry_on()
+    assert control.settled()
+    assert len(told.threads) == 1  # one thread told us everything
+    assert asking not in told.threads  # and it was not ours
+    assert seen == list(told.threads)  # the question was answered in it too
+
+
+def test_a_controller_closes_while_a_program_runs(told, tmp_path):
+    """Closing must not wait for a program without an end: the run is told to stop
+    and the thread ends."""
+    control = RunController(told, out=io.StringIO())
+    opened(control, tmp_path, FOREVER)
+    control.carry_on()
+    assert waited_for(lambda: any(one.state == RUNNING for one in told.snapshots))
+    control.close()
+    assert control._thread.is_alive() is False
+
+
+def test_the_thread_ends_because_it_was_told_to(told, tmp_path):
+    """Closing is not a thread falling over: nothing is raised in it, and it says
+    that it ended on the word rather than on an accident. A window that closes must
+    not spill a traceback down the terminal it was started from."""
+    raised = []
+    control = RunController(told, out=io.StringIO())
+    before = threading.excepthook
+    threading.excepthook = raised.append
+    try:
+        opened(control, tmp_path)
+        control.step()
+        assert control.settled()
+        control.close()
+    finally:
+        threading.excepthook = before
+    assert raised == []
+    assert control.closed is True
+    assert control._thread.is_alive() is False
+
+
+def test_closing_a_controller_twice_is_no_trouble(control, told, tmp_path):
+    opened(control, tmp_path)
+    control.close()
+    control.close()
+
+
+# -------------------------------------------------- the program asks for a line
+
+
+def test_a_program_waiting_for_a_line(control, told, tmp_path):
+    opened(control, tmp_path, ASKS)
+    control.carry_on()
+    assert waited_for(lambda: any(one.what == ASKING for one in told.answers))
+    assert control.settled(0.2) is False  # it is waiting, and it waits
+    control.answer("Ann")
+    assert control.settled()
+    assert told.last.stopped.reason == "exited"
+
+
+def test_a_program_asking_when_there_is_no_more_input(control, told, tmp_path):
+    opened(control, tmp_path, ASKS)
+    control.no_more_input()
+    control.carry_on()
+    assert control.settled()
+    assert told.last.stopped.reason == "exited"
+    assert not [one for one in told.answers if one.what == ASKING]
+
+
+def test_what_the_program_was_given_is_what_it_read(told, tmp_path):
+    """The program reads what was answered and writes to the streams the caller
+    gave: a window shows the one and types the other."""
+    out = io.StringIO()
+    back = ASKS.replace("li a7, 93", "li a7, 4\n        la a0, buffer\n"
+                        "        ecall\n        li a7, 93")
+    with RunController(told, out=out) as inner:
+        opened(inner, tmp_path, back)
+        inner.carry_on()
+        assert waited_for(lambda: any(one.what == ASKING for one in told.answers))
+        inner.answer("Ann")
+        assert inner.settled()
+    assert "Ann" in out.getvalue()
+
+
+# ------------------------------------------------------- waiting for an answer
+
+
+def ended_with(*answers: str) -> Waiting:
+    """Something to read, and nothing after it. The input is ended at once so that
+    no test here can be made to wait for ever by a reader that is wrong: what is
+    being tested is what it does with what it was given."""
+    waiting = Waiting()
+    for answer in answers:
+        waiting.answer(answer)
+    waiting.ended()
+    return waiting
+
+
+def test_a_line_answered_before_it_was_asked_for():
+    waiting = ended_with("Ann")
+    assert waiting.readline() == "Ann\n"
+
+
+def test_an_answer_that_already_ends_its_line():
+    waiting = ended_with("Ann\n")
+    assert waiting.readline() == "Ann\n"
+
+
+def test_two_lines_answered_at_once():
+    waiting = ended_with("one\ntwo")
+    assert waiting.readline() == "one\n"
+    assert waiting.readline() == "two\n"
+
+
+def test_characters_taken_from_what_was_answered():
+    waiting = ended_with("Ann")
+    assert waiting.read(2) == "An"
+    assert waiting.read(2) == "n\n"
+
+
+def test_the_end_of_the_input():
+    waiting = Waiting()
+    waiting.ended()
+    assert waiting.readline() == ""
+    assert waiting.read(4) == ""
+
+
+def test_what_was_answered_outlives_the_end_of_the_input():
+    """The input ending does not throw away what somebody had already typed: the
+    program reads it, and sees the end after it."""
+    waiting = Waiting()
+    waiting.answer("one")
+    waiting.answer("two")
+    waiting.ended()
+    assert waiting.readline() == "one\n"
+    assert waiting.readline() == "two\n"
+    assert waiting.readline() == ""
+
+
+def test_the_input_may_end_while_the_program_waits():
+    """A reader waiting for a line nobody is going to give it is woken by the end
+    of the input - otherwise a window could not be closed while its program waits.
+    """
+    waiting = Waiting()
+    read = []
+    reader = threading.Thread(target=lambda: read.append(waiting.readline()),
+                              daemon=True)
+    reader.start()
+    assert waited_for(lambda: waiting.lines.empty())  # it is waiting by now
+    waiting.ended()
+    reader.join(5)
+    assert read == [""]
+
+
+def test_whoever_waits_is_asked_only_while_there_is_something_to_wait_for():
+    asked = []
+    waiting = Waiting(asked=lambda: asked.append(1))
+    waiting.answer("Ann")
+    assert waiting.readline() == "Ann\n"
+    assert asked == []  # the answer was already there: nobody was asked
+    waiting.ended()
+    assert waiting.readline() == ""
+    assert asked == []
