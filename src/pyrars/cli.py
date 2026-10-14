@@ -35,6 +35,7 @@ from pyrars.analysis.pipeline import Settings as PipelineSettings
 from pyrars.analysis.stats import Statistics
 from pyrars.analysis.watchers import Watchers
 from pyrars.console import VALUE_FORMATS, Debugger, TerminalIO, value_text
+from pyrars.session import project as projects
 from pyrars.session.debug import Session
 from pyrars.devices import DeviceBus, make, names as device_names
 from pyrars.isa.classes import Kind
@@ -111,10 +112,17 @@ def _parser() -> argparse.ArgumentParser:
                      help='the entry point is the label "main" if there is one')
 
     run = commands.add_parser("run", help="assemble and run a program")
-    run.add_argument("files", nargs="+", help="source files of one program")
-    run.add_argument("-x", "--xlen", type=int, choices=(32, 64), default=32,
+    run.add_argument("files", nargs="*", help="source files of one program")
+    run.add_argument("--project", metavar="FILE",
+                     help="read what the program IS from a project file: its files, "
+                          "its main file, the width of the machine, the memory "
+                          "configuration and whether pseudo-instructions are allowed. "
+                          "What it settles cannot be given again on the line")
+    # Both of these say nothing by default, so that a project can be told from a
+    # flag: what a project settles may not be given twice.
+    run.add_argument("-x", "--xlen", type=int, choices=(32, 64), default=None,
                      help="width of the registers (default: 32)")
-    run.add_argument("-m", "--mem-config", choices=tuple(CONFIGS), default="Default",
+    run.add_argument("-m", "--mem-config", choices=tuple(CONFIGS), default=None,
                      help="memory configuration (default: Default)")
     run.add_argument("--self-modifying", action="store_true",
                      help="let the program read and write its own text")
@@ -301,6 +309,11 @@ def _text_lines(program: AssembledProgram, segment: str) -> list[str]:
 def _run(arguments, out, errors, reader) -> int:
     """Assemble a program and run it. The program writes to the same streams and
     reads from the same input as the command line itself."""
+    try:
+        _settled(arguments)
+    except ValueError as problem:
+        print(problem, file=errors)
+        return 1
     config = CONFIGS[arguments.mem_config]
     program = assemble(arguments.files, Options(
         xlen=arguments.xlen, config=config, pseudo=not arguments.no_pseudo,
@@ -379,6 +392,45 @@ def _run(arguments, out, errors, reader) -> int:
     if stop.reason is StopReason.EXCEPTION:
         return 1
     return stop.code
+
+
+def _settled(arguments) -> None:
+    """What the program is: from a project file, or from the line itself.
+
+    A project settles the files, the main file, the width of the machine, the
+    memory configuration and the pseudo-instructions, so none of those may be
+    given on the line as well - a flag that quietly loses to a file, or wins over
+    it, is worse than a refusal. What it does not settle - the devices, the
+    models, the breakpoints, how much to print - is given on the line as ever.
+    """
+    if arguments.project is None:
+        if not arguments.files:
+            raise ValueError("name the files of the program, or --project FILE")
+        arguments.xlen = 32 if arguments.xlen is None else arguments.xlen
+        arguments.mem_config = ("Default" if arguments.mem_config is None
+                                else arguments.mem_config)
+        return
+    given = [name for name, value in (("the files", arguments.files),
+                                      ("-x", arguments.xlen is not None),
+                                      ("-m", arguments.mem_config is not None),
+                                      ("--no-pseudo", arguments.no_pseudo)) if value]
+    if given:
+        raise ValueError(f"--project settles what the program is, so {_listed(given)} "
+                         "cannot be given as well")
+    project = projects.read(arguments.project)
+    if not project.files:
+        raise ValueError(f"{arguments.project}: the project names no files")
+    arguments.files = list(project.paths)
+    arguments.xlen = project.xlen
+    arguments.mem_config = project.mem_config
+    arguments.no_pseudo = not project.pseudo
+
+
+def _listed(names: Sequence[str]) -> str:
+    """Several things named in a sentence, the last one after an "and"."""
+    if len(names) == 1:
+        return names[0]
+    return ", ".join(names[:-1]) + " and " + names[-1]
 
 
 def _debug(arguments, program: AssembledProgram, config: MemoryConfig,
