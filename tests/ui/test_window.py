@@ -6,6 +6,8 @@ offers only what can be done. Everything these tests lean on about WHICH actions
 are possible is tested without GTK in `tests/unit/test_ui_actions.py`.
 """
 
+from pathlib import Path
+
 import pytest
 
 from pyrars.session import project as projects
@@ -52,7 +54,7 @@ def window(gtk, tmp_path, request):
     source = getattr(request, "param", SUM)
     (tmp_path / "main.s").write_text(source)
     project = projects.of([str(tmp_path / "main.s")], folder=str(tmp_path))
-    made = Window(project=project, text=source)
+    made = Window(project=project, cache=str(tmp_path / "cache"))
     yield made
     made.close_up()
 
@@ -70,14 +72,21 @@ def shown(view) -> str:
 
 
 def test_a_window_is_built(window):
-    assert window.get_title() == "pyRARS"
+    assert window.get_title() == "main.s - pyRARS"  # the file it was opened on
     assert window.get_content() is not None
-    assert len(window.buttons) == 9
+    # the nine of the run, and the two of the files that have a button of their own
+    assert len(window.buttons) == 11
 
 
-def test_the_program_is_shown_before_anything_is_assembled(window):
-    assert "main:   li t0, 3" in shown(window.program)
-    assert sensible(window) == {"assemble"}  # and nothing else can be done yet
+def test_the_program_is_open_in_the_editor_before_anything_is_assembled(window):
+    assert "main:   li t0, 3" in window.editor.page.text
+    assert window.editor.page.path.endswith("main.s")
+    # of the run, only assembling; of the files, what one open file allows.
+    # `sensible` sees the buttons of the header; the rest live in the menu, which
+    # is why what CAN be done is asked of the window itself.
+    assert sensible(window) == {"assemble", "open"}
+    assert window.allowed() >= {"assemble", "open", "new", "find", "close_tab"}
+    assert not window.allowed() & {"step", "continue", "back", "pause", "stop"}
 
 
 # --------------------------------------------------------------- what it does
@@ -88,8 +97,9 @@ def test_a_program_assembled(window, turning):
     assert turning(lambda: window.state == "standing")
     assert "pc           0x00400000" in shown(window.standing)
     assert "instructions 0" in shown(window.standing)
-    assert sensible(window) == {"assemble", "continue", "step", "over", "finish",
+    assert sensible(window) >= {"assemble", "continue", "step", "over", "finish",
                                 "restart"}
+    assert not sensible(window) & {"pause", "stop", "back"}
 
 
 def test_a_step_and_what_the_window_says_of_it(window, turning):
@@ -119,7 +129,8 @@ def test_a_run_to_its_end(window, turning):
     assert turning(lambda: window.state == "ended")
     assert f"instructions {WHOLE}" in shown(window.standing)
     assert "stopped      exited" in shown(window.standing)
-    assert sensible(window) == {"assemble", "restart", "back"}
+    assert sensible(window) >= {"assemble", "restart", "back"}
+    assert not sensible(window) & {"step", "continue", "over", "finish", "pause"}
 
 
 def test_what_cannot_be_done_is_not_even_asked_for(window, turning):
@@ -153,6 +164,56 @@ def test_a_restart(window, turning):
     window.do("restart")
     assert turning(lambda: window.state == "standing")
     assert "instructions 0" in shown(window.standing)
+
+
+# ------------------------------------------------- the editor and the machine
+
+
+def test_what_is_on_the_screen_is_what_is_assembled(window, turning):
+    """An assembler reads files from the disk, so what has been changed is written
+    there first - and then the machine runs what the person typed, not what the
+    file held when it was opened."""
+    page = window.editor.page
+    page.buffer.set_text(SUM.replace("li t0, 3", "li t0, 9"))
+    assert window.editor.modified is True
+    window.do("assemble")
+    assert turning(lambda: window.state == "standing")
+    assert window.editor.modified is False  # it was saved on the way
+    assert "li t0, 9" in Path(page.path).read_text()
+    window.do("step")
+    assert turning(lambda: "instructions 1" in shown(window.standing))
+    window.control.ask("t0", lambda session: session.registers(("t0",))[0].value)
+    assert turning(lambda: "t0: 9" in shown(window.messages))
+
+
+def test_a_file_that_is_nowhere_cannot_be_assembled(gtk, tmp_path, turning):
+    from pyrars.ui.window import Window
+
+    made = Window(cache=str(tmp_path / "cache"))
+    try:
+        made.editor.add("li t0, 1\n")  # never saved, so it is on no disk
+        made.do("assemble")
+        assert turning(lambda: "nothing to assemble" in shown(made.messages))
+        assert made.state == "nothing"
+    finally:
+        made.close_up()
+
+
+def test_the_window_says_which_file_is_being_worked_on(window, turning):
+    from pyrars.ui.shown import CHANGED
+
+    assert window.get_title() == "main.s - pyRARS"
+    window.editor.page.buffer.insert_at_cursor("# a change\n")
+    assert window.get_title() == f"main.s {CHANGED} - pyRARS"
+
+
+def test_a_new_file_and_what_can_be_done_to_it(window):
+    window.do("new")
+    assert len(window.editor.pages) == 2
+    assert window.editor.page.path is None
+    # it is on no disk, so it may always be saved - the person is asked where
+    assert "save" in window.allowed()
+    assert window.get_title().startswith("Untitled")
 
 
 # ------------------------------------------------------------- what it shows

@@ -17,17 +17,18 @@ NAME = "org.pyrars.Pyrars"
 class Application(Adw.Application):
     """What holds the window, the actions and their keys together."""
 
-    def __init__(self, project: Project | None = None, text: str = "") -> None:
+    def __init__(self, project: Project | None = None,
+                 files: tuple[str, ...] = ()) -> None:
         super().__init__(application_id=NAME, flags=Gio.ApplicationFlags.FLAGS_NONE)
         self.project = project
-        self.text = text
+        self.files = files
         self.window: Window | None = None
 
     def do_startup(self) -> None:
         Adw.Application.do_startup(self)
         # Every action of `ui/actions.py` becomes an action of the application, so
         # that a key reaches it wherever the pointer happens to be.
-        for action in actions.ACTIONS:
+        for action in actions.ACTIONS + actions.FILES:
             doing = Gio.SimpleAction.new(action.name, None)
             doing.connect("activate", self._asked, action.name)
             self.add_action(doing)
@@ -40,7 +41,7 @@ class Application(Adw.Application):
     def do_activate(self) -> None:
         if self.window is None:
             self.window = Window(application=self, project=self.project,
-                                 text=self.text)
+                                 files=self.files)
             self.window.connect("close-request", self._closing)
         self.window.present()
 

@@ -27,8 +27,8 @@ def main(argv: list[str] | None = None) -> int:
     except ValueError as problem:
         print(problem, file=sys.stderr)
         return 1
-    text = "\n".join(Path(path).read_text() for path in project.paths) if project else ""
-    return Application(project=project, text=text).run([])
+    files = tuple(project.paths) if project is not None else ()
+    return Application(project=project, files=files).run([])
 
 
 def _opened(arguments) -> projects.Project | None:

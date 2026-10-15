@@ -9,7 +9,8 @@ code and not a choice to be mutated away quietly.
 import pytest
 
 from pyrars.session.control import ENDED, NOTHING, RUNNING, STANDING
-from pyrars.ui.actions import ACTIONS, BY_NAME, Action, possible
+from pyrars.ui.actions import (
+    ACTIONS, BY_NAME, FILES, Action, possible, possible_of_a_file)
 
 
 def test_nothing_but_assembling_before_a_program_is_opened():
@@ -74,6 +75,56 @@ def test_the_guesses_say_that_they_are_guesses():
     a window must not offer them as if they were certain (D21)."""
     assert "guess" in BY_NAME["over"].about
     assert "guess" in BY_NAME["finish"].about
+
+
+# ------------------------------------------------------- what is done to a file
+
+
+def test_nothing_but_opening_with_no_file_open():
+    assert possible_of_a_file() == {"new", "open"}
+
+
+def test_what_can_be_done_to_a_file_that_is_open():
+    assert possible_of_a_file(1) == {"new", "open", "save_as", "close_tab", "find"}
+
+
+def test_a_file_is_saved_when_there_is_something_to_save():
+    assert "save" not in possible_of_a_file(1)  # it is as it is on the disk
+    assert "save" in possible_of_a_file(1, modified=True)
+
+
+def test_a_file_that_has_never_been_saved_can_always_be_saved():
+    """There is somewhere for it to go: the person is asked where."""
+    assert "save" in possible_of_a_file(1, modified=False, named=False)
+
+
+def test_undoing_needs_something_to_undo():
+    assert "undo" not in possible_of_a_file(1)
+    assert "redo" not in possible_of_a_file(1)
+    assert "undo" in possible_of_a_file(1, undo=True)
+    assert "redo" in possible_of_a_file(1, redo=True)
+
+
+def test_what_is_done_to_a_file_does_not_depend_on_what_the_machine_is_doing():
+    """A program may be read and written while it runs: the two rules do not meet,
+    and nothing of a file is in the rule of the run."""
+    of_the_run = {action.name for action in ACTIONS}
+    of_a_file = {action.name for action in FILES}
+    assert not of_the_run & of_a_file
+    assert possible_of_a_file(1, modified=True) == possible_of_a_file(1, modified=True)
+
+
+def test_every_action_of_a_file_has_a_key_of_its_own():
+    keys = [action.keys for action in FILES]
+    assert len(set(keys)) == len(keys)
+    assert BY_NAME["save"].keys == "<Primary>s"  # what every editor uses
+    assert BY_NAME["find"].keys == "<Primary>f"
+    assert BY_NAME["undo"].keys == "<Primary>z"
+
+
+def test_no_two_actions_anywhere_share_a_key():
+    keys = [action.keys for action in ACTIONS + FILES]
+    assert len(set(keys)) == len(keys)
 
 
 def test_a_state_nobody_has():

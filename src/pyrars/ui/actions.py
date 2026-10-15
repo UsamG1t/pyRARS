@@ -59,11 +59,51 @@ ACTIONS = (
            "the watches stay", "F12", frozenset({STANDING, ENDED})),
 )
 
-BY_NAME = {action.name: action for action in ACTIONS}
+# What is done to the FILES rather than to the run. These do not depend on what the
+# machine is doing - a program may be read and written while it runs - but on what
+# is open and what has been changed, so they have a rule of their own.
+FILES = (
+    Action("new", "New", "A file that is not on the disk yet", "<Primary>n",
+           frozenset()),
+    Action("open", "Open", "Open a file of a program", "<Primary>o", frozenset()),
+    Action("save", "Save", "Write this file to the disk", "<Primary>s", frozenset()),
+    Action("save_as", "Save as", "Write this file somewhere else",
+           "<Primary><Shift>s", frozenset()),
+    Action("close_tab", "Close", "Close this file", "<Primary>w", frozenset()),
+    Action("find", "Find", "Find and replace in this file", "<Primary>f",
+           frozenset()),
+    Action("undo", "Undo", "Take back the last change to this file", "<Primary>z",
+           frozenset()),
+    Action("redo", "Redo", "Do again what was taken back", "<Primary><Shift>z",
+           frozenset()),
+)
+
+BY_NAME = {action.name: action for action in ACTIONS + FILES}
 
 
 def possible(state: str, journal: int = 0) -> frozenset[str]:
-    """The actions that can be done now: in this state of the run, with this many
-    steps left in the journal."""
+    """The actions of the RUN that can be done now: in this state of the run, with
+    this many steps left in the journal."""
     return frozenset(action.name for action in ACTIONS
                      if state in action.states and (journal or not action.journal))
+
+
+def possible_of_a_file(pages: int = 0, modified: bool = False, named: bool = True,
+                       undo: bool = False, redo: bool = False) -> frozenset[str]:
+    """The actions of the FILES that can be done now.
+
+    A file that has never been saved can always be saved - there is somewhere for
+    it to go, and the person is asked where - while one that is on the disk already
+    is saved only when it has been changed; everything else needs a file open at
+    all, and undo and redo need something to undo.
+    """
+    if not pages:
+        return frozenset({"new", "open"})
+    doing = {"new", "open", "save_as", "close_tab", "find"}
+    if modified or not named:
+        doing.add("save")
+    if undo:
+        doing.add("undo")
+    if redo:
+        doing.add("redo")
+    return frozenset(doing)

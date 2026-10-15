@@ -7,17 +7,21 @@ about the run comes from the controller, whose events arrive from the thread of 
 run and are handed to the main loop before a widget is touched (INV-T).
 """
 
+from pathlib import Path
+
 import gi
 
 gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
 
-from gi.repository import Adw, GLib, Gtk, Pango  # noqa: E402 - after require_version
+from gi.repository import Adw, Gio, GLib, Gtk  # noqa: E402 - after require_version
 
 from pyrars.session.control import (  # noqa: E402
     NOTHING, Answer, Failed, RunController, Snapshot)
+from pyrars.session import project as projects  # noqa: E402
 from pyrars.session.project import Project  # noqa: E402
-from pyrars.ui import actions  # noqa: E402
+from pyrars.ui import actions, shown  # noqa: E402
+from pyrars.ui.editor import Editor  # noqa: E402
 
 
 class Writing:
@@ -48,7 +52,8 @@ class Window(Adw.ApplicationWindow):
 
     __gtype_name__ = "PyrarsWindow"
 
-    def __init__(self, project: Project | None = None, text: str = "", **kept) -> None:
+    def __init__(self, project: Project | None = None, files: tuple[str, ...] = (),
+                 cache: str | None = None, **kept) -> None:
         super().__init__(title="pyRARS", **kept)
         self.project = project
         self.state = NOTHING
@@ -56,11 +61,14 @@ class Window(Adw.ApplicationWindow):
         self.buttons: dict[str, Gtk.Button] = {}
         self.set_default_size(1100, 740)
 
-        self.program = _reading(text)
+        self.editor = Editor(cache)
+        self.editor.watchers.append(self._files_changed)
         self.standing = _telling()
         self.console = _telling()
         self.messages = _telling()
         self.set_content(self._built())
+        for path in files or (project.paths if project is not None else ()):
+            self.editor.open(path)
 
         # The controller writes from its own thread; `Writing` hands every piece to
         # the main loop, and the events go the same way through `_told`.
@@ -78,20 +86,46 @@ class Window(Adw.ApplicationWindow):
 
     def _header(self) -> Gtk.Widget:
         header = Adw.HeaderBar()
+        files = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        for name, icon in (("open", "document-open-symbolic"),
+                           ("save", "document-save-symbolic")):
+            files.append(self._button(actions.BY_NAME[name], icon))
+        header.pack_start(files)
+
         doing = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
         doing.add_css_class("linked")
         for action in actions.ACTIONS:
-            button = Gtk.Button(label=action.label)
-            button.set_tooltip_text(f"{action.about} ({action.keys})")
-            button.connect("clicked", self._asked, action.name)
-            self.buttons[action.name] = button
-            doing.append(button)
+            doing.append(self._button(action))
         header.pack_start(doing)
+        header.pack_end(self._menu())
         return header
+
+    def _button(self, action: actions.Action, icon: str | None = None) -> Gtk.Button:
+        button = (Gtk.Button(icon_name=icon) if icon
+                  else Gtk.Button(label=action.label))
+        button.set_tooltip_text(f"{action.about} ({action.keys})")
+        button.connect("clicked", self._asked, action.name)
+        self.buttons[action.name] = button
+        return button
+
+    def _menu(self) -> Gtk.Widget:
+        """What is done to the files, where a header bar has no room for it."""
+        menu = Gio.Menu()
+        files = Gio.Menu()
+        for name in ("new", "open", "save", "save_as", "close_tab"):
+            files.append(actions.BY_NAME[name].label, f"app.{name}")
+        changes = Gio.Menu()
+        for name in ("undo", "redo", "find"):
+            changes.append(actions.BY_NAME[name].label, f"app.{name}")
+        menu.append_section(None, files)
+        menu.append_section(None, changes)
+        menu.append_section(None, _one_item("Quit", "app.quit"))
+        return Gtk.MenuButton(icon_name="open-menu-symbolic", menu_model=menu,
+                              tooltip_text="Everything else")
 
     def _panes(self) -> Gtk.Widget:
         upper = Gtk.Paned(orientation=Gtk.Orientation.HORIZONTAL)
-        upper.set_start_child(_in_a_frame(self.program, "Program"))
+        upper.set_start_child(self.editor)
         upper.set_end_child(_in_a_frame(self.standing, "Machine"))
         upper.set_position(720)
         upper.set_resize_start_child(True)
@@ -117,19 +151,90 @@ class Window(Adw.ApplicationWindow):
 
     def do(self, name: str) -> None:
         """One action by its name, if it is possible at all."""
-        if name not in actions.possible(self.state, self.journal):
+        if name not in self.allowed():
+            return
+        if name in _OF_A_FILE:
+            _OF_A_FILE[name](self)
             return
         if name == "assemble":
-            if self.project is not None:
-                self.control.load(self.project)
+            self._assembled()
             return
         getattr(self.control, {"continue": "carry_on"}.get(name, name))()
 
+    def allowed(self) -> frozenset[str]:
+        """Everything that can be done at this moment, of the run and of the files
+        alike."""
+        page = self.editor.page
+        buffer = page.buffer if page is not None else None
+        return actions.possible(self.state, self.journal) | actions.possible_of_a_file(
+            len(self.editor.pages), self.editor.modified,
+            named=bool(page.path) if page is not None else True,
+            undo=bool(buffer and buffer.get_can_undo()),
+            redo=bool(buffer and buffer.get_can_redo()))
+
     def _possible(self) -> None:
         """Only what can be done now can be pressed."""
-        allowed = actions.possible(self.state, self.journal)
+        allowed = self.allowed()
         for name, button in self.buttons.items():
             button.set_sensitive(name in allowed)
+
+    # ---------------------------------------------------------------- the files
+
+    def _assembled(self) -> None:
+        """Assemble what is on the screen.
+
+        The assembler reads files from the disk, so everything that has been
+        changed is written there first; a file that has never been saved is asked
+        about rather than guessed at.
+        """
+        self.editor.save_every_change()
+        paths = self.editor.paths
+        if not paths:
+            self._said("nothing to assemble: no file of the program is saved yet")
+            return
+        self.project = (self.project.with_files(paths) if self.project is not None
+                        else projects.of(paths, folder=str(Path(paths[0]).parent)))
+        self.control.load(self.project)
+
+    def _opening(self) -> None:
+        dialog = Gtk.FileDialog(title="Open a file of the program")
+        dialog.open(self, None, self._opened)
+
+    def _opened(self, dialog, answer) -> None:
+        try:
+            file = dialog.open_finish(answer)
+        except GLib.Error:  # the person changed their mind
+            return
+        if file is not None:
+            self.editor.open(file.get_path())
+
+    def _saving(self) -> None:
+        page = self.editor.page
+        if page is None:
+            return
+        if page.path:
+            self.editor.save()
+            return
+        self._saving_as()
+
+    def _saving_as(self) -> None:
+        dialog = Gtk.FileDialog(title="Write this file")
+        dialog.save(self, None, self._saved)
+
+    def _saved(self, dialog, answer) -> None:
+        try:
+            file = dialog.save_finish(answer)
+        except GLib.Error:
+            return
+        if file is not None:
+            self.editor.save(file.get_path())
+
+    def _files_changed(self) -> None:
+        """The editor's tabs or their state changed."""
+        page = self.editor.page
+        self.set_title(shown.window_title(page.path if page else None,
+                                          page.modified if page else False))
+        self._possible()
 
     # ------------------------------------------------------- what comes back
 
@@ -182,20 +287,30 @@ class Window(Adw.ApplicationWindow):
         self.control.close()
 
 
+# What each action of the files does to the window.
+_OF_A_FILE = {
+    "new": lambda window: window.editor.add(),
+    "open": lambda window: window._opening(),
+    "save": lambda window: window._saving(),
+    "save_as": lambda window: window._saving_as(),
+    "close_tab": lambda window: window.editor.close(),
+    "find": lambda window: window.editor.find(),
+    "undo": lambda window: window.editor.undo(),
+    "redo": lambda window: window.editor.redo(),
+}
+
+
+def _one_item(label: str, action: str) -> Gio.Menu:
+    menu = Gio.Menu()
+    menu.append(label, action)
+    return menu
+
+
 def _telling() -> Gtk.TextView:
     """A view that shows text nobody types into."""
     view = Gtk.TextView(editable=False, cursor_visible=False, monospace=True)
     view.set_left_margin(8)
     view.set_top_margin(4)
-    return view
-
-
-def _reading(text: str) -> Gtk.TextView:
-    """The program, as a window shows it until the editor of stage 42 arrives."""
-    view = Gtk.TextView(editable=False, monospace=True)
-    view.set_left_margin(8)
-    view.set_top_margin(4)
-    view.get_buffer().set_text(text)
     return view
 
 
