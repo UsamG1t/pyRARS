@@ -44,6 +44,7 @@ EVERY = 1 / 30
 NOTHING = "nothing"  # no program is open
 STANDING = "standing"  # a program is open and the machine stands still
 RUNNING = "running"
+WAITING = "waiting"  # the program has asked for a line and nothing goes on until it has one
 ENDED = "ended"  # the run is over: a restart or a step back follows
 
 # The names the controller answers under, where it asks something of its own.
@@ -94,8 +95,9 @@ class Waiting:
     hands the same line out again without asking anyone.
     """
 
-    def __init__(self, asked=None) -> None:
-        self.asked = asked
+    def __init__(self, asked=None, answered=None) -> None:
+        self.asked = asked  # the program wants a line and nothing has one
+        self.answered = answered  # and now it has one
         self.lines: queue.Queue[str] = queue.Queue()
         self.kept = ""  # what was answered and not taken yet
         self.over = False
@@ -104,9 +106,19 @@ class Waiting:
         self.lines.put(text if text.endswith("\n") else text + "\n")
 
     def ended(self) -> None:
-        """There is no more input; a program asking for more sees the end of it."""
+        """There is no more input; a program asking for more sees the end of it.
+
+        This is also the only way to WAKE a program that is waiting for a line
+        nobody is going to give it, which is what ending a run has to do: the
+        thread of the run is standing here and not in the loop of the machine, so
+        the flag that stops the loop would never be read.
+        """
         self.over = True
         self.lines.put("")
+
+    def again(self) -> None:
+        """The input is open once more, for a run that begins again."""
+        self.over = False
 
     def readline(self) -> str:
         """One line. An answer may hold several, or none of a line at all, so what
@@ -145,7 +157,10 @@ class Waiting:
             return ""
         if self.asked is not None:
             self.asked()
-        return self.lines.get()
+        line = self.lines.get()
+        if self.answered is not None:
+            self.answered()
+        return line
 
 
 class RunController:
@@ -157,7 +172,8 @@ class RunController:
         # input to read, and the answer comes from whoever owns its main loop. What
         # the program writes goes to the streams the caller gives - a window hands
         # over something that shows what is written as it arrives.
-        self.waiting = Waiting(asked=lambda: self.tell(Answer(ASKING, None)))
+        self.waiting = Waiting(asked=self._asked_for_a_line,
+                               answered=self._given_a_line)
         self.io = ConsoleIO(out=out, errors=errors, reader=self.waiting)
         self.every = every
         self.session: Session | None = None
@@ -201,6 +217,7 @@ class RunController:
         self._movement("until", lambda session: session.until(address))
 
     def restart(self) -> None:
+        self.waiting.again()
         self._movement("restart", lambda session: session.restart())
 
     def look(self) -> None:
@@ -230,10 +247,17 @@ class RunController:
         `pause` lets the machine stand and the run go on from there; `stop` is the
         end of that run, as it is in RARS, and what follows it is a restart - or a
         step back, for the journal reaches over the end of a run like anywhere else.
+
+        A program WAITING for a line is ended as well. The flag of the loop would
+        never be read there - the thread is standing in the input and not in the
+        machine - so its input is ended, which wakes it; what the program makes of
+        that is its own business, and what the person is told is that the run was
+        stopped, because that is what they asked for.
         """
         self._stopping = True
         if self.session is not None:
             self.session.simulator.stop()
+        self.waiting.ended()
 
     def answer(self, text: str) -> None:
         """Hand the program the line it is waiting for."""
@@ -306,8 +330,22 @@ class RunController:
             if self._stopping:  # the run was told to end, and it has
                 session.ended = True
                 self._stopping = False
+                # The input was ended to wake the run; whatever follows - a step
+                # back and on again, a restart - may be spoken to afresh.
+                self.waiting.again()
             self.state = ENDED if session.ended else STANDING
         return self._shot(stopped)
+
+    def _asked_for_a_line(self) -> None:
+        """The program wants a line, IN THE THREAD OF THE RUN: nothing of the
+        machine goes on until somebody answers, and the window must say so."""
+        self.state = WAITING
+        self.tell(Answer(ASKING, None))
+        self.tell(self._shot())
+
+    def _given_a_line(self) -> None:
+        self.state = RUNNING
+        self.tell(self._shot())
 
     def _load(self, project: Project, arguments, kept) -> Answer:
         program = assemble(project.paths, project.options())
@@ -315,6 +353,7 @@ class RunController:
         if program.failed:
             self.session, self.state = None, NOTHING
             return Answer(LOAD, program)
+        self.waiting.again()
         self.session = Session(program, io=self.io, arguments=arguments,
                                watch=self._turn, **kept)
         self.state = STANDING

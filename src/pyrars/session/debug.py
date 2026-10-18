@@ -53,7 +53,8 @@ CLIFF = "cliff"
 LIMIT = "limit"
 WAITING = "waiting"
 TRAPPED = "trapped"
-PAUSED = "paused"
+PAUSED = "paused"  # the machine stands, and the run may go on from there
+STOPPED = "stopped"  # the run was told to end where it was
 NOTHING = "nothing"  # there was nothing to do
 ENDED = "ended"  # the run is over, and nothing but a restart or a step back follows
 
@@ -65,7 +66,7 @@ REASONS = {
     StopReason.EXCEPTION: TRAPPED,
     StopReason.BREAKPOINT: BREAKPOINT,
     StopReason.PAUSE: PAUSED,
-    StopReason.STOP: PAUSED,
+    StopReason.STOP: STOPPED,
 }
 
 

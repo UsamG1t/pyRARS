@@ -32,6 +32,19 @@ loop:   add t1, t1, t0
 """
 WHOLE = 2 + 3 * 3 + 2 + 1 + 2  # the loop three times, `la` being two instructions
 
+ASKS = """\
+.globl main
+.text
+main:   li a7, 5        # a number, please
+        ecall
+        mv t0, a0
+        li a7, 1        # and here it is again
+        mv a0, t0
+        ecall
+        li a7, 10
+        ecall
+"""
+
 SPEAKS = """\
 .globl main
 .data
@@ -164,6 +177,74 @@ def test_a_restart(window, turning):
     window.do("restart")
     assert turning(lambda: window.state == "standing")
     assert "instructions 0" in shown(window.standing)
+
+
+# ------------------------------------------------ the program asks for a line
+
+
+@pytest.mark.parametrize("window", [ASKS], indirect=True)
+def test_a_program_waiting_says_so_and_can_only_be_stopped(window, turning):
+    window.do("assemble")
+    assert turning(lambda: window.state == "standing")
+    window.do("continue")
+    assert turning(lambda: window.state == "waiting")
+    assert "waiting" in shown(window.standing)
+    assert "waiting for a line" in window.typing.get_placeholder_text()
+    assert sensible(window) & {"pause", "step", "continue", "restart"} == set()
+    assert "stop" in sensible(window)
+    window.do("stop")
+    assert turning(lambda: window.state == "ended")
+
+
+@pytest.mark.parametrize("window", [ASKS], indirect=True)
+def test_what_is_typed_goes_to_the_program_and_into_the_console(window, turning):
+    """A terminal is one thing: what was typed is written where the program writes,
+    so that what is read afterwards is the whole conversation."""
+    window.do("assemble")
+    assert turning(lambda: window.state == "standing")
+    window.do("continue")
+    assert turning(lambda: window.state == "waiting")
+    window.typing.set_text("40")
+    window._typed()
+    assert turning(lambda: window.state == "ended")
+    assert shown(window.console) == "40\n40"  # typed, then printed back
+    assert window.typing.get_text() == ""  # and the line is clear for the next one
+    assert "waiting" not in window.typing.get_placeholder_text()
+
+
+@pytest.mark.parametrize("window", [ASKS], indirect=True)
+def test_the_console_is_brought_forward_when_the_program_asks(window, turning):
+    window.views.set_current_page(1)  # looking at the messages
+    window.do("assemble")
+    assert turning(lambda: window.state == "standing")
+    window.do("continue")
+    assert turning(lambda: window.views.get_current_page() == 0)
+
+
+@pytest.mark.parametrize("window", [ASKS], indirect=True)
+def test_a_line_may_be_typed_before_the_program_asks_for_it(window, turning):
+    """As it may at a terminal: what is typed waits until the program reads it, and
+    nobody is told that the program is waiting, because it never had to."""
+    window.do("assemble")
+    assert turning(lambda: window.state == "standing")
+    window.typing.set_text("7")
+    window._typed()
+    window.do("continue")
+    assert turning(lambda: window.state == "ended")
+    assert shown(window.console) == "7\n7"
+
+
+def test_a_file_that_is_not_there_is_said_and_not_thrown(gtk, tmp_path):
+    """A window given a name nobody has must still open."""
+    from pyrars.ui.window import Window
+
+    made = Window(files=(str(tmp_path / "nothing.s"),),
+                  cache=str(tmp_path / "cache"))
+    try:
+        assert "No such file" in shown(made.messages)
+        assert made.editor.pages == []
+    finally:
+        made.close_up()
 
 
 # ------------------------------------------------- the editor and the machine

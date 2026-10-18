@@ -8,7 +8,7 @@ code and not a choice to be mutated away quietly.
 
 import pytest
 
-from pyrars.session.control import ENDED, NOTHING, RUNNING, STANDING
+from pyrars.session.control import ENDED, NOTHING, RUNNING, STANDING, WAITING
 from pyrars.ui.actions import (
     ACTIONS, BY_NAME, FILES, Action, possible, possible_of_a_file)
 
@@ -31,6 +31,13 @@ def test_only_stopping_while_the_machine_is_going():
 
 def test_what_is_left_when_the_run_is_over():
     assert possible(ENDED) == {"assemble", "restart"}
+
+
+def test_a_program_waiting_for_a_line_can_only_be_ended():
+    """There is nothing to pause: the machine is not going anywhere until somebody
+    types. Everything else would queue behind a thread that is standing still."""
+    assert possible(WAITING) == {"stop"}
+    assert possible(WAITING, journal=99) == {"stop"}
 
 
 def test_a_step_back_needs_something_in_the_journal():

@@ -19,8 +19,8 @@ import pytest
 
 from pyrars.session import project as projects
 from pyrars.session.control import (
-    ASKING, ENDED, LOAD, NOTHING, RUNNING, STANDING, Answer, Failed, RunController,
-    Snapshot, Waiting)
+    ASKING, ENDED, LOAD, NOTHING, RUNNING, STANDING, WAITING, Answer, Failed,
+    RunController, Snapshot, Waiting)
 
 SUM = """\
 .globl main
@@ -452,6 +452,96 @@ def test_a_program_waiting_for_a_line(control, told, tmp_path):
     control.carry_on()
     assert waited_for(lambda: any(one.what == ASKING for one in told.answers))
     assert control.settled(0.2) is False  # it is waiting, and it waits
+    control.answer("Ann")
+    assert control.settled()
+    assert told.last.stopped.reason == "exited"
+
+
+def test_a_program_waiting_is_a_state_of_its_own(control, told, tmp_path):
+    """Nothing of the machine goes on while a program waits for a line, and a
+    window that said "running" would be offering to pause something that is not
+    going anywhere."""
+    opened(control, tmp_path, ASKS)
+    control.carry_on()
+    assert waited_for(lambda: control.state == WAITING)
+    assert told.last.state == WAITING
+    assert told.last.place is not None  # and it still says where the machine is
+    control.answer("Ann")
+    assert control.settled()
+    assert WAITING not in [one.state for one in told.snapshots[-1:]]
+    assert told.last.stopped.reason == "exited"
+
+
+def test_a_line_given_puts_the_run_back_on_its_way(told, tmp_path):
+    """The moment the line is taken, the run is going again - and every snapshot
+    from then on says so. One that still said "waiting" would have a window
+    offering to stop something that is already on its way."""
+    with RunController(told, out=io.StringIO(), every=0) as control:
+        opened(control, tmp_path, ASKS)
+        control.carry_on()
+        assert waited_for(lambda: control.state == WAITING)
+        waiting = len(told.snapshots)
+        control.answer("Ann")
+        assert control.settled()
+    after = [one.state for one in told.snapshots[waiting:]]
+    assert after  # the run went on, and said so more than once
+    assert WAITING not in after
+    assert RUNNING in after
+
+
+def test_a_run_stopped_while_it_waited_may_be_taken_back_and_gone_on_with(
+        control, told, tmp_path):
+    """Ending a run ends its input. A step back reaches over the end of a run, so
+    what follows must be able to ask for a line again - otherwise the program
+    would meet the end of its input the moment it asked."""
+    opened(control, tmp_path, ASKS)
+    control.carry_on()
+    assert waited_for(lambda: control.state == WAITING)
+    control.stop()
+    assert control.settled()
+    control.back(2)
+    control.carry_on()
+    assert waited_for(lambda: control.state == WAITING)
+    control.answer("Ann")
+    assert control.settled()
+    assert told.last.stopped.reason == "exited"
+
+
+def test_a_run_waiting_for_a_line_can_still_be_stopped(control, told, tmp_path):
+    """The flag that stops the loop would never be read: the thread is standing in
+    the input, not in the machine. Ending the input is what wakes it."""
+    opened(control, tmp_path, ASKS)
+    control.carry_on()
+    assert waited_for(lambda: control.state == WAITING)
+    control.stop()
+    assert control.settled()
+    assert told.last.state == ENDED
+    assert told.last.stopped.reason == "stopped"
+
+
+def test_what_a_stopped_run_says_is_that_it_was_stopped(control, told, tmp_path):
+    """The program is woken by its input ending, and what it makes of that - here,
+    a number it cannot read - never reaches the person: the loop of the machine
+    sees the flag before the next instruction and ends the run as a STOP."""
+    opened(control, tmp_path, ASKS)
+    control.carry_on()
+    assert waited_for(lambda: control.state == WAITING)
+    control.stop()
+    assert control.settled()
+    assert told.last.stopped.message == ""  # not what the program made of it
+
+
+def test_a_run_that_begins_again_may_be_spoken_to_again(control, told, tmp_path):
+    """Ending a run ends its input; the next one has an input of its own, or
+    nothing could ever be typed after a stop."""
+    opened(control, tmp_path, ASKS)
+    control.carry_on()
+    assert waited_for(lambda: control.state == WAITING)
+    control.stop()
+    assert control.settled()
+    control.restart()
+    control.carry_on()
+    assert waited_for(lambda: control.state == WAITING)
     control.answer("Ann")
     assert control.settled()
     assert told.last.stopped.reason == "exited"

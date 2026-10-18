@@ -17,7 +17,7 @@ gi.require_version("Adw", "1")
 from gi.repository import Adw, Gio, GLib, Gtk  # noqa: E402 - after require_version
 
 from pyrars.session.control import (  # noqa: E402
-    NOTHING, Answer, Failed, RunController, Snapshot)
+    ASKING, NOTHING, WAITING, Answer, Failed, RunController, Snapshot)
 from pyrars.session import project as projects  # noqa: E402
 from pyrars.session.project import Project  # noqa: E402
 from pyrars.ui import actions, shown  # noqa: E402
@@ -68,7 +68,7 @@ class Window(Adw.ApplicationWindow):
         self.messages = _telling()
         self.set_content(self._built())
         for path in files or (project.paths if project is not None else ()):
-            self.editor.open(path)
+            self.open(path)
 
         # The controller writes from its own thread; `Writing` hands every piece to
         # the main loop, and the events go the same way through `_told`.
@@ -137,10 +137,25 @@ class Window(Adw.ApplicationWindow):
         return whole
 
     def _views(self) -> Gtk.Widget:
-        views = Gtk.Notebook()
-        views.append_page(_scrolled(self.console), Gtk.Label(label="Console"))
-        views.append_page(_scrolled(self.messages), Gtk.Label(label="Messages"))
-        return views
+        self.views = Gtk.Notebook()
+        self.views.append_page(self._console(), Gtk.Label(label="Console"))
+        self.views.append_page(_scrolled(self.messages), Gtk.Label(label="Messages"))
+        return self.views
+
+    def _console(self) -> Gtk.Widget:
+        """What the program writes, and the line it is waiting for.
+
+        One page, as a terminal is one thing: what is typed is echoed where the
+        program's own writing goes, so that what is read afterwards is the whole
+        conversation and not half of it.
+        """
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+        box.append(_scrolled(self.console))
+        self.typing = Gtk.Entry(placeholder_text=_TYPE_HERE, margin_top=4,
+                                margin_bottom=4, margin_start=4, margin_end=4)
+        self.typing.connect("activate", lambda *gone: self._typed())
+        box.append(self.typing)
+        return box
 
     # ------------------------------------------------------------- what is done
 
@@ -196,6 +211,14 @@ class Window(Adw.ApplicationWindow):
                         else projects.of(paths, folder=str(Path(paths[0]).parent)))
         self.control.load(self.project)
 
+    def open(self, path: str) -> None:
+        """A file into the editor. A file that cannot be read is SAID, not thrown:
+        a window that is given a name nobody has must still open."""
+        try:
+            self.editor.open(path)
+        except OSError as problem:
+            self._said(f"{path}: {problem.strerror or problem}")
+
     def _opening(self) -> None:
         dialog = Gtk.FileDialog(title="Open a file of the program")
         dialog.open(self, None, self._opened)
@@ -206,7 +229,7 @@ class Window(Adw.ApplicationWindow):
         except GLib.Error:  # the person changed their mind
             return
         if file is not None:
-            self.editor.open(file.get_path())
+            self.open(file.get_path())
 
     def _saving(self) -> None:
         page = self.editor.page
@@ -249,7 +272,11 @@ class Window(Adw.ApplicationWindow):
             self.state, self.journal = event.state, event.back
             self._shown(event)
             self._possible()
+            self.typing.set_placeholder_text(
+                _WAITING if event.state == WAITING else _TYPE_HERE)
         elif isinstance(event, Answer):
+            if event.what == ASKING:
+                self._waiting_for_a_line()
             self._said(f"{event.what}: {_short(event.value)}")
         elif isinstance(event, Failed):
             self._said(f"{event.what} failed: {event.message}")
@@ -269,6 +296,20 @@ class Window(Adw.ApplicationWindow):
             lines.append(f"stopped      {shot.stopped.reason}")
         self.standing.get_buffer().set_text("\n".join(lines))
 
+    def _typed(self) -> None:
+        """A line for the program. It may be typed before the program asks for it,
+        as it may at a terminal, and it waits here until the program reads it."""
+        line = self.typing.get_text()
+        self.typing.set_text("")
+        self._added(self.console, line + "\n")
+        self.control.answer(line)
+
+    def _waiting_for_a_line(self) -> None:
+        """The program has asked for something: the console is where the answer
+        goes, so that is what the window shows, with the cursor already in it."""
+        self.views.set_current_page(0)
+        self.typing.grab_focus()
+
     def _said(self, line: str) -> None:
         self._added(self.messages, line + "\n")
 
@@ -285,6 +326,11 @@ class Window(Adw.ApplicationWindow):
         """Let the thread of the run end; a window that is closing waits for
         nothing."""
         self.control.close()
+
+
+# What the line under the console says when nothing is in it.
+_TYPE_HERE = "A line for the program"
+_WAITING = "The program is waiting for a line - type it here"
 
 
 # What each action of the files does to the window.

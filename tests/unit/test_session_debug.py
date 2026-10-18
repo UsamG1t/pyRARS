@@ -227,6 +227,21 @@ def test_finish_outside_any_call(sum_session):
     assert sum_session.finish().reason == NOTHING
 
 
+def test_a_run_that_was_stopped_is_told_from_one_that_was_paused(sum_session):
+    """Two different things happened, and a front end has to be able to say which:
+    a paused run goes on from where it stands, a stopped one does not."""
+    from pyrars.core.simulator import Stop, StopReason
+    from pyrars.session.debug import PAUSED, REASONS, STOPPED
+
+    assert REASONS[StopReason.PAUSE] == PAUSED
+    assert REASONS[StopReason.STOP] == STOPPED
+    # Neither can be asked for from here: the loop clears both flags as it begins,
+    # so only another thread can pause or stop a run that is already going. What
+    # the two REASONS come to is held in the tests of the controller.
+    assert sum_session._ended(Stop(StopReason.STOP, 0), 3).reason == STOPPED
+    assert sum_session._ended(Stop(StopReason.PAUSE, 0), 3).reason == PAUSED
+
+
 def test_a_movement_knows_a_run_that_ended(sum_session):
     sum_session.until(TEXT + 0x30)  # standing on the `ecall` that exits
     stopped = sum_session.step()

@@ -19,7 +19,7 @@ actions it has not got took the free keys beside them.
 
 from dataclasses import dataclass
 
-from pyrars.session.control import ENDED, NOTHING, RUNNING, STANDING
+from pyrars.session.control import ENDED, NOTHING, RUNNING, STANDING, WAITING
 
 # A run that has ended, or stands still, or has not begun: in all three the
 # machine is not going anywhere by itself.
@@ -53,8 +53,11 @@ ACTIONS = (
            frozenset({STANDING, ENDED}), journal=True),
     Action("pause", "Pause", "Let the machine stand where it is; the run may carry "
            "on from there", "F9", frozenset({RUNNING})),
+    # A program waiting for a line can only be ended: the machine is not going
+    # anywhere, so there is nothing to pause, and nothing else can be done to it
+    # until it has its line.
     Action("stop", "Stop", "End the run where it is", "F11",
-           frozenset({RUNNING})),
+           frozenset({RUNNING, WAITING})),
     Action("restart", "Restart", "The program from the beginning; the breakpoints and "
            "the watches stay", "F12", frozenset({STANDING, ENDED})),
 )
