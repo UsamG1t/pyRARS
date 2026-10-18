@@ -17,7 +17,7 @@ gi.require_version("Adw", "1")
 from gi.repository import Adw, Gio, GLib, Gtk  # noqa: E402 - after require_version
 
 from pyrars.session.control import (  # noqa: E402
-    ASKING, NOTHING, WAITING, Answer, Failed, RunController, Snapshot)
+    ASKING, LOAD, NOTHING, WAITING, Answer, Failed, RunController, Snapshot)
 from pyrars.session import project as projects  # noqa: E402
 from pyrars.session.project import Project  # noqa: E402
 from pyrars.ui import actions, shown  # noqa: E402
@@ -63,6 +63,7 @@ class Window(Adw.ApplicationWindow):
 
         self.editor = Editor(cache)
         self.editor.watchers.append(self._files_changed)
+        self.editor.marked.append(self._breakpoint_changed)
         self.standing = _telling()
         self.console = _telling()
         self.messages = _telling()
@@ -277,10 +278,59 @@ class Window(Adw.ApplicationWindow):
         elif isinstance(event, Answer):
             if event.what == ASKING:
                 self._waiting_for_a_line()
+            elif event.what == LOAD:
+                self._assembled_into(event.value)
+                return GLib.SOURCE_REMOVE
+            elif event.what == BREAKS:
+                self._breaks_that_missed(event.value)
+                return GLib.SOURCE_REMOVE
             self._said(f"{event.what}: {_short(event.value)}")
         elif isinstance(event, Failed):
             self._said(f"{event.what} failed: {event.message}")
         return GLib.SOURCE_REMOVE
+
+    # ---------------------------------------------- what the editor is told
+
+    def _assembled_into(self, program) -> None:
+        """What the assembler said, into the margins of the files it said it
+        about; what it said about no place at all, into the messages."""
+        by_file, loose = shown.problems(program.diagnostics)
+        self.editor.problems(by_file)
+        self.editor.labels = tuple(program.symbols)
+        for message in loose:
+            self._said(message)
+        counted = sum(len(these) for these in by_file.values()) + len(loose)
+        if program.failed:
+            self._said(f"the program has not been assembled: {counted} to mend")
+            return
+        self._said(f"assembled: {len(program.text)} instructions"
+                   + (f", {counted} to say about it" if counted else ""))
+        self._breaks_to_the_machine()
+
+    def _breakpoint_changed(self, page, line: int, on: bool) -> None:
+        """A breakpoint was put on or taken off in the margin."""
+        if self.state != NOTHING:
+            self._breaks_to_the_machine()
+
+    def _breaks_to_the_machine(self) -> None:
+        """Every breakpoint the person has put in, as the machine's own.
+
+        They are all given again each time rather than one being added or taken
+        off: what the margins hold is what the run must stop at, and saying the
+        whole of it cannot drift from it.
+        """
+        wanted = self.editor.breakpoints()
+        self.control.ask(BREAKS, lambda session: _asked_to_stop(session, wanted))
+
+    def _breaks_that_missed(self, missed) -> None:
+        """A line with no instruction on it cannot be stopped before, so the mark
+        comes off again and the person is told why."""
+        for path, line in missed:
+            for page in self.editor.pages:
+                if page.path == path and line in page.marked("breakpoint"):
+                    page.toggle(line)
+            self._said(f"{_short(path)}:{line}: no instruction of the program is "
+                       "there, so nothing can stop before it")
 
     def _shown(self, shot: Snapshot) -> None:
         """Where the machine stands, as much of it as a skeleton shows."""
@@ -295,6 +345,8 @@ class Window(Adw.ApplicationWindow):
         if shot.stopped is not None:
             lines.append(f"stopped      {shot.stopped.reason}")
         self.standing.get_buffer().set_text("\n".join(lines))
+        place = shot.place
+        self.editor.here(place.file if place else None, place.line if place else 0)
 
     def _typed(self) -> None:
         """A line for the program. It may be typed before the program asks for it,
@@ -328,6 +380,9 @@ class Window(Adw.ApplicationWindow):
         self.control.close()
 
 
+# What the window asks the session for under its own name.
+BREAKS = "breaks"
+
 # What the line under the console says when nothing is in it.
 _TYPE_HERE = "A line for the program"
 _WAITING = "The program is waiting for a line - type it here"
@@ -344,6 +399,19 @@ _OF_A_FILE = {
     "undo": lambda window: window.editor.undo(),
     "redo": lambda window: window.editor.redo(),
 }
+
+
+def _asked_to_stop(session, wanted) -> list[tuple[str, int]]:
+    """Give the session every breakpoint the margins hold, IN THE THREAD OF THE
+    RUN; answers with those it could not take."""
+    session.remove_break()
+    missed = []
+    for path, line in wanted:
+        try:
+            session.add_break(session.address_of(f"{path}:{line}"))
+        except ValueError:
+            missed.append((path, line))
+    return missed
 
 
 def _one_item(label: str, action: str) -> Gio.Menu:

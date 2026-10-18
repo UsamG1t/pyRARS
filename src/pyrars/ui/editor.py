@@ -20,10 +20,21 @@ gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
 gi.require_version("GtkSource", "5")
 
-from gi.repository import Adw, GLib, Gtk, GtkSource  # noqa: E402
+from gi.repository import Adw, Gio, GLib, GObject, Gtk, GtkSource  # noqa: E402
 
-from pyrars.ui import shown  # noqa: E402
+from pyrars.ui import completions, shown  # noqa: E402
+from pyrars.ui.help import about  # noqa: E402
 from pyrars.ui.highlighting import ID, language  # noqa: E402
+
+# What the margin of the editor can hold, and what each of them looks like. A
+# breakpoint and the place the machine stands at are OURS; the other two are what
+# the assembler said about the line.
+MARKS = {
+    shown.ERROR: ("dialog-error-symbolic", 30),
+    shown.WARNING: ("dialog-warning-symbolic", 20),
+    "breakpoint": ("media-record-symbolic", 10),
+    "here": ("go-next-symbolic", 40),
+}
 
 
 def languages(folder: str | None = None) -> GtkSource.LanguageManager:
@@ -68,6 +79,18 @@ class Page(Gtk.Box):
         self.view.set_insert_spaces_instead_of_tabs(True)
         self.view.set_tab_width(8)
         self.view.set_left_margin(6)
+        self.view.set_show_line_marks(True)
+        # What each mark says, by its kind and its line. It is kept HERE and not on
+        # the mark: a mark fetched out of the buffer again is a new Python object
+        # every time, and anything hung on the old one is gone.
+        self.says: dict[tuple[str, int], str] = {}
+        for category, (icon, priority) in MARKS.items():
+            look = GtkSource.MarkAttributes(icon_name=icon)
+            look.connect("query-tooltip-markup", self._said_of_a_mark)
+            self.view.set_mark_attributes(category, look, priority)
+        # What a word is, where the pointer rests on one.
+        self.view.set_has_tooltip(True)
+        self.view.connect("query-tooltip", self._about_a_word)
         window = Gtk.ScrolledWindow(hexpand=True, vexpand=True)
         window.set_child(self.view)
         self.append(window)
@@ -80,6 +103,70 @@ class Page(Gtk.Box):
     @property
     def modified(self) -> bool:
         return self.buffer.get_modified()
+
+    # ------------------------------------------------------------- the margin
+
+    def mark(self, category: str, line: int, says: str = "") -> None:
+        """Put a mark in the margin beside a line, counted from one as a person
+        counts."""
+        place = self.buffer.get_iter_at_line(max(line - 1, 0))[1]
+        self.buffer.create_source_mark(None, category, place)
+        if says:
+            self.says[(category, line)] = says
+
+    def unmark(self, category: str) -> None:
+        start, end = self.buffer.get_bounds()
+        self.buffer.remove_source_marks(start, end, category)
+        self.says = {where: what for where, what in self.says.items()
+                     if where[0] != category}
+
+    def _said_of_a_mark(self, attributes, mark) -> str:
+        where = (mark.get_category(),
+                 self.buffer.get_iter_at_mark(mark).get_line() + 1)
+        return GLib.markup_escape_text(self.says.get(where, ""))
+
+    def marked(self, category: str) -> list[int]:
+        """The lines that carry a mark of this kind, counted from one."""
+        found, place = [], self.buffer.get_start_iter()
+        while True:
+            if self.buffer.get_source_marks_at_iter(place, category):
+                found.append(place.get_line() + 1)
+            if not place.forward_line():
+                break
+        return found
+
+    def toggle(self, line: int, category: str = "breakpoint") -> bool:
+        """Put a mark where there is none, take it off where there is one; answers
+        with whether there is one now."""
+        if line in self.marked(category):
+            place = self.buffer.get_iter_at_line(max(line - 1, 0))[1]
+            after = place.copy()
+            after.forward_line()
+            self.buffer.remove_source_marks(place, after, category)
+            return False
+        self.mark(category, line)
+        return True
+
+    def _about_a_word(self, view, x: int, y: int, keyboard: bool,
+                      tooltip: Gtk.Tooltip) -> bool:
+        """What the word under the pointer is, from the tables of the assembler."""
+        if keyboard:
+            return False
+        where = view.window_to_buffer_coords(Gtk.TextWindowType.TEXT, x, y)
+        found, place = view.get_iter_at_location(where[1], where[2])
+        if not found:
+            return False
+        one = about(_word_at(place))
+        if one is None:
+            return False
+        lines = [f"<b>{GLib.markup_escape_text(one.word)}</b>  <i>{one.kind}</i>",
+                 GLib.markup_escape_text(one.about)]
+        for index, form in enumerate(one.forms):
+            becomes = one.becomes[index] if index < len(one.becomes) else ""
+            lines.append(GLib.markup_escape_text(
+                f"{form}" + (f"   \u2192 {becomes}" if becomes else "")))
+        tooltip.set_markup("\n".join(lines))
+        return True
 
     def save(self, path: str | None = None) -> str:
         """Write the file. Answers with where it went; raises ValueError where
@@ -105,6 +192,8 @@ class Editor(Gtk.Box):
         self.tabs = Adw.TabView(vexpand=True)
         self.tabs.connect("notify::selected-page", lambda *gone: self.changed())
         self.watchers: list = []  # told whenever the tabs or their state change
+        self.marked: list = []  # told whenever a breakpoint is put on or taken off
+        self.labels: tuple[str, ...] = ()  # the names of the program, for the words
 
         bar = Adw.TabBar(view=self.tabs, autohide=False)
         self.search = Search(self)
@@ -126,6 +215,8 @@ class Editor(Gtk.Box):
     def add(self, text: str = "", path: str | None = None) -> Adw.TabPage:
         page = Page(self.languages, path, text)
         page.buffer.connect("modified-changed", lambda *gone: self.changed())
+        page.view.get_completion().add_provider(Words(lambda: self.labels))
+        page.view.connect("line-mark-activated", self._gutter)
         tab = self.tabs.append(page)
         self._named(tab, page)
         self.tabs.set_selected_page(tab)
@@ -186,6 +277,49 @@ class Editor(Gtk.Box):
 
     def find(self) -> None:
         self.search.open()
+
+    # ----------------------------------------------------- what is in the margin
+
+    def _gutter(self, view, place, button, state, clicks) -> None:
+        """The margin was clicked: a breakpoint goes on or comes off that line."""
+        page = next((one for one in self.pages if one.view is view), None)
+        if page is not None:
+            self.toggle_breakpoint(page, place.get_line() + 1)
+
+    def toggle_breakpoint(self, page: Page, line: int) -> bool:
+        """Put a breakpoint on a line or take it off, and tell whoever is watching
+        - which is the only way the machine hears of it."""
+        on = page.toggle(line)
+        for watcher in self.marked:
+            watcher(page, line, on)
+        return on
+
+    def breakpoints(self) -> list[tuple[str, int]]:
+        """Every breakpoint the person has put in, as a file and a line."""
+        return [(page.path, line) for page in self.pages if page.path
+                for line in page.marked("breakpoint")]
+
+    def problems(self, by_file: dict) -> None:
+        """What the assembler said, into the margins it was said about."""
+        for page in self.pages:
+            page.unmark(shown.ERROR)
+            page.unmark(shown.WARNING)
+            for one in by_file.get(page.path, ()):
+                page.mark(one.kind, one.line, one.message)
+
+    def here(self, path: str | None, line: int) -> None:
+        """Where the machine stands, in the margin of the right file."""
+        for page in self.pages:
+            page.unmark("here")
+        if not path:
+            return
+        for page in self.pages:
+            if page.path == path:
+                page.mark("here", line)
+                self.tabs.set_selected_page(self.tabs.get_page(page))
+                page.view.scroll_to_iter(
+                    page.buffer.get_iter_at_line(max(line - 1, 0))[1],
+                    0.2, False, 0.0, 0.0)
 
     # ------------------------------------------------------------ the telling
 
@@ -294,6 +428,85 @@ class Search(Gtk.SearchBar):
         if not self._ready():
             return 0
         return self.context.replace_all(self.instead.get_text(), -1)
+
+
+class Word(GObject.Object, GtkSource.CompletionProposal):
+    """One word the editor offers."""
+
+    __gtype_name__ = "PyrarsWord"
+
+    def __init__(self, text: str) -> None:
+        super().__init__()
+        self.text = text
+
+
+class Words(GObject.Object, GtkSource.CompletionProvider):
+    """What the editor offers while a line is being typed.
+
+    WHICH words those are is worked out by `ui/completions.py`, which knows
+    nothing of GTK; this is the part that hands them over and puts the chosen one
+    in. The names a program gives things come from whoever built the editor, since
+    they change with every assembly.
+    """
+
+    __gtype_name__ = "PyrarsWords"
+
+    def __init__(self, labels=None) -> None:
+        super().__init__()
+        self.labels = labels if labels is not None else (lambda: ())
+
+    def do_get_title(self) -> str:
+        return "pyRARS"
+
+    def do_populate_async(self, context, cancellable, callback, data=None) -> None:
+        task = Gio.Task.new(self, cancellable, callback, data)
+        store = Gio.ListStore.new(Word)
+        for text in self.offered(context):
+            store.append(Word(text))
+        task.return_value(store)
+
+    def do_populate_finish(self, result):
+        return result.propagate_value().value
+
+    def offered(self, context) -> tuple[str, ...]:
+        """The words for where the typing is."""
+        buffer = context.get_buffer()
+        place = buffer.get_iter_at_mark(buffer.get_insert())
+        line = place.copy()
+        line.set_line_offset(0)
+        return completions.words(line.get_text(place), labels=self.labels())
+
+    def do_display(self, context, proposal, cell) -> None:
+        if cell.get_column() == GtkSource.CompletionColumn.TYPED_TEXT:
+            cell.set_text(proposal.text)
+
+    def do_activate(self, context, proposal) -> None:
+        """Put the word in place of what was typed of it."""
+        buffer = context.get_buffer()
+        found, start, end = context.get_bounds()
+        buffer.begin_user_action()
+        if found:
+            buffer.delete(start, end)
+        buffer.insert(start, proposal.text)
+        buffer.end_user_action()
+
+
+def _word_at(place) -> str:
+    """The whole word the place is inside, as a program writes words."""
+    start = place.copy()
+    while not start.starts_line() and _of_a_word(start.copy(), back=True):
+        start.backward_char()
+    end = place.copy()
+    while not end.ends_line() and _of_a_word(end.copy()):
+        end.forward_char()
+    return start.get_text(end)
+
+
+def _of_a_word(place, back: bool = False) -> bool:
+    if back:
+        place.backward_char()
+    letter = place.get_char()
+    return bool(letter) and (letter.isalnum() or letter in "_.$")
 
 
 def _button(icon: str, about: str, doing) -> Gtk.Button:

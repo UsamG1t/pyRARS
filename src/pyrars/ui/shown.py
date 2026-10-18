@@ -6,6 +6,7 @@ tested and mutated like every other module of the project. The widgets ask it an
 put the answer up.
 """
 
+from dataclasses import dataclass
 from pathlib import Path
 
 UNTITLED = "Untitled"
@@ -28,3 +29,39 @@ def window_title(path: str | None, modified: bool = False) -> str:
     """The title of the window: the file being worked on, and the name of the tool
     after it, as every editor writes it."""
     return f"{tab_title(path, modified)} - pyRARS"
+
+
+ERROR = "error"
+WARNING = "warning"
+
+
+@dataclass(frozen=True, slots=True)
+class Problem:
+    """One thing the assembler had to say about one line."""
+
+    line: int
+    kind: str  # "error" or "warning"
+    message: str
+
+
+def problems(diagnostics) -> tuple[dict[str, tuple[Problem, ...]], tuple[str, ...]]:
+    """What the assembler said, by the file it said it about.
+
+    A diagnostic that names no place belongs to no line and cannot be marked in
+    the margin of anything; those come back on their own, for a window to say
+    somewhere a person will see them.
+    """
+    found: dict[str, list[Problem]] = {}
+    loose: list[str] = []
+    for one in diagnostics:
+        if one.loc is None:
+            loose.append(one.message)
+            continue
+        found.setdefault(one.loc.file, []).append(
+            Problem(one.loc.line, one.kind.lower(), one.message))
+    return ({file: tuple(these) for file, these in found.items()}, tuple(loose))
+
+
+def said(problems_of_a_line) -> str:
+    """What the margin of one line says when the pointer rests on it."""
+    return "\n".join(f"{one.kind}: {one.message}" for one in problems_of_a_line)

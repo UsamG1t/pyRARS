@@ -235,3 +235,153 @@ def test_the_search_asks_for_nothing_when_no_file_is_open(editor):
     assert editor.search.next() is False
     assert editor.search.replace() is False
     assert editor.search.replace_all() == 0
+
+
+# ------------------------------------------------------------- the margin
+
+
+def test_a_mark_in_the_margin_and_what_it_says(editor, file):
+    page = editor.open(file).get_child()
+    page.mark("error", 3, "nothing of the kind")
+    assert page.marked("error") == [3]
+    assert page.says[("error", 3)] == "nothing of the kind"
+    page.unmark("error")
+    assert page.marked("error") == []
+    assert page.says == {}
+
+
+def test_a_mark_is_counted_from_one_as_a_person_counts(editor, file):
+    page = editor.open(file).get_child()
+    page.mark("error", 1, "the first line")
+    place = page.buffer.get_iter_at_line(0)[1]
+    assert page.buffer.get_source_marks_at_iter(place, "error")
+
+
+def test_a_breakpoint_goes_on_and_comes_off(editor, file):
+    page = editor.open(file).get_child()
+    assert editor.toggle_breakpoint(page, 5) is True
+    assert page.marked("breakpoint") == [5]
+    assert editor.toggle_breakpoint(page, 5) is False
+    assert page.marked("breakpoint") == []
+
+
+def test_whoever_watches_hears_of_every_breakpoint(editor, file):
+    """It is the only way the machine hears of one."""
+    heard = []
+    editor.marked.append(lambda page, line, on: heard.append((line, on)))
+    page = editor.open(file).get_child()
+    editor.toggle_breakpoint(page, 5)
+    editor.toggle_breakpoint(page, 5)
+    assert heard == [(5, True), (5, False)]
+
+
+def test_the_breakpoints_of_every_file(editor, tmp_path):
+    for name in ("one.s", "two.s"):
+        (tmp_path / name).write_text("nop\nnop\nnop\n")
+        editor.open(str(tmp_path / name))
+    editor.toggle_breakpoint(editor.pages[0], 2)
+    editor.toggle_breakpoint(editor.pages[1], 3)
+    assert sorted(editor.breakpoints()) == [
+        (str(tmp_path / "one.s"), 2), (str(tmp_path / "two.s"), 3)]
+
+
+def test_a_file_that_is_nowhere_has_no_breakpoints_to_give(editor):
+    """A breakpoint is a place in a file, and a file that was never saved is in no
+    place the assembler could be told about."""
+    page = editor.add("nop\n").get_child()
+    editor.toggle_breakpoint(page, 1)
+    assert page.marked("breakpoint") == [1]
+    assert editor.breakpoints() == []
+
+
+def test_what_the_assembler_said_goes_into_the_margins(editor, tmp_path):
+    from pyrars.ui.shown import Problem
+
+    (tmp_path / "one.s").write_text("nop\nnop\n")
+    page = editor.open(str(tmp_path / "one.s")).get_child()
+    editor.problems({str(tmp_path / "one.s"): (Problem(2, "error", "no such thing"),)})
+    assert page.marked("error") == [2]
+    assert page.says[("error", 2)] == "no such thing"
+    editor.problems({})  # assembled again, and this time it was sound
+    assert page.marked("error") == []
+
+
+def test_where_the_machine_stands_is_marked_in_the_right_file(editor, tmp_path):
+    for name in ("one.s", "two.s"):
+        (tmp_path / name).write_text("nop\nnop\nnop\n")
+        editor.open(str(tmp_path / name))
+    editor.here(str(tmp_path / "one.s"), 2)
+    assert editor.pages[0].marked("here") == [2]
+    assert editor.pages[1].marked("here") == []
+    # and the file it is in is the one being looked at
+    assert editor.page is editor.pages[0]
+    editor.here(str(tmp_path / "two.s"), 3)
+    assert editor.pages[0].marked("here") == []
+    assert editor.pages[1].marked("here") == [3]
+
+
+def test_a_place_in_no_file_marks_nothing(editor, file):
+    page = editor.open(file).get_child()
+    editor.here(file, 2)
+    editor.here(None, 0)
+    assert page.marked("here") == []
+
+
+# --------------------------------------------------------- the words offered
+
+
+class Asking:
+    """What a completion asks of the buffer, without a completion to ask it."""
+
+    def __init__(self, buffer):
+        self.buffer = buffer
+
+    def get_buffer(self):
+        return self.buffer
+
+
+def test_the_words_offered_come_from_where_the_typing_is(editor, file):
+    from pyrars.ui.editor import Words
+
+    page = editor.open(file).get_child()
+    page.buffer.set_text("        ad")
+    page.buffer.place_cursor(page.buffer.get_end_iter())
+    assert Words().offered(Asking(page.buffer)) == ("add", "addi")
+
+
+def test_the_names_of_the_program_are_offered_as_they_are_known(editor, file):
+    from pyrars.ui.editor import Words
+
+    page = editor.open(file).get_child()
+    page.buffer.set_text("        la t0, ta")
+    page.buffer.place_cursor(page.buffer.get_end_iter())
+    words = Words(lambda: editor.labels)
+    assert words.offered(Asking(page.buffer)) == ()
+    editor.labels = ("table", "total")
+    # only one of them begins as the typing does
+    assert words.offered(Asking(page.buffer))[0] == "table"
+
+
+# ------------------------------------------------- the word under the pointer
+
+
+def test_the_word_a_place_is_inside(editor):
+    from pyrars.ui.editor import _word_at
+
+    page = editor.add("        addi t0, t1, 1  # and a comment\n").get_child()
+    buffer = page.buffer
+    #         addi t0, t1, 1  # and a comment
+    #   8---^  12^ ^13   ^18 ^21  ^24
+    # The place just after a word belongs to that word: a pointer resting at the
+    # end of "addi" is resting on "addi", which is what anybody would expect.
+    for offset, expected in ((8, "addi"), (12, "addi"), (13, "t0"), (18, "t1"),
+                             (21, "1"), (24, "")):
+        assert _word_at(buffer.get_iter_at_offset(offset)) == expected, offset
+
+
+def test_a_word_is_not_taken_across_a_line(editor):
+    from pyrars.ui.editor import _word_at
+
+    page = editor.add("addi\nt0\n").get_child()
+    assert _word_at(page.buffer.get_iter_at_offset(0)) == "addi"
+    assert _word_at(page.buffer.get_iter_at_offset(5)) == "t0"

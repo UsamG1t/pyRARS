@@ -247,6 +247,100 @@ def test_a_file_that_is_not_there_is_said_and_not_thrown(gtk, tmp_path):
         made.close_up()
 
 
+# ----------------------------------------- what the editor is told of a program
+
+
+BROKEN = """\
+.text
+main:   li t0, 1
+        nonsense t0, t1
+        ecall
+"""
+
+
+@pytest.mark.parametrize("window", [BROKEN], indirect=True)
+def test_what_the_assembler_said_goes_into_the_margin(window, turning):
+    window.do("assemble")
+    assert turning(lambda: "not been assembled" in shown(window.messages))
+    page = window.editor.page
+    assert page.marked("error") == [3]
+    assert "not a recognized operator" in page.says[("error", 3)]
+    assert window.state == "nothing"  # and there is nothing to run
+
+
+def test_a_program_that_assembles_leaves_no_marks_behind(window, turning):
+    window.do("assemble")
+    assert turning(lambda: window.state == "standing")
+    page = window.editor.page
+    assert page.marked("error") == []
+    assert "assembled: " in shown(window.messages)
+
+
+def test_the_names_of_the_program_reach_the_words_offered(window, turning):
+    window.do("assemble")
+    assert turning(lambda: window.state == "standing")
+    assert "main" in window.editor.labels
+    assert "loop" in window.editor.labels
+
+
+def test_a_breakpoint_put_in_the_margin_stops_the_run(window, turning):
+    window.do("assemble")
+    assert turning(lambda: window.state == "standing")
+    page = window.editor.page
+    window.editor.toggle_breakpoint(page, 7)  # the `add` of the loop
+    assert turning(lambda: True)
+    window.do("continue")
+    assert turning(lambda: window.state == "standing"
+                   and "breakpoint" in shown(window.standing))
+    assert page.marked("here") == [7]  # and the margin says where it stands
+
+
+def test_a_breakpoint_taken_off_again_stops_nothing(window, turning):
+    window.do("assemble")
+    assert turning(lambda: window.state == "standing")
+    page = window.editor.page
+    window.editor.toggle_breakpoint(page, 7)
+    window.editor.toggle_breakpoint(page, 7)
+    assert turning(lambda: True)
+    window.do("continue")
+    assert turning(lambda: window.state == "ended")
+
+
+def test_a_breakpoint_where_no_instruction_is_comes_off_again(window, turning):
+    """A line that holds no instruction cannot be stopped before, so the mark goes
+    and the person is told why rather than left to wonder."""
+    window.do("assemble")
+    assert turning(lambda: window.state == "standing")
+    page = window.editor.page
+    window.editor.toggle_breakpoint(page, 2)  # ".data"
+    assert turning(lambda: "no instruction of the program is there"
+                   in shown(window.messages))
+    assert page.marked("breakpoint") == []
+
+
+def test_the_breakpoints_of_the_margin_are_given_to_a_program_as_it_is_assembled(
+        window, turning):
+    """They are put in before there is anything to put them in, which is the
+    ordinary way of working: open a file, mark a line, assemble."""
+    page = window.editor.page
+    window.editor.toggle_breakpoint(page, 7)
+    window.do("assemble")
+    assert turning(lambda: window.state == "standing")
+    window.do("continue")
+    assert turning(lambda: "breakpoint" in shown(window.standing))
+
+
+def test_the_margin_follows_the_machine(window, turning):
+    window.do("assemble")
+    assert turning(lambda: window.state == "standing")
+    page = window.editor.page
+    assert turning(lambda: page.marked("here") == [5])  # `main`
+    window.do("step")
+    assert turning(lambda: page.marked("here") == [6])
+    window.do("back")
+    assert turning(lambda: page.marked("here") == [5])
+
+
 # ------------------------------------------------- the editor and the machine
 
 
@@ -309,8 +403,12 @@ def test_what_the_program_writes_reaches_the_console(window, turning):
 
 
 def test_what_the_controller_says_reaches_the_messages(window, turning):
+    """What an assembly came to is said in a line a person can read, and not as the
+    whole of an assembled program printed out."""
     window.do("assemble")
-    assert turning(lambda: "load:" in shown(window.messages))
+    assert turning(lambda: "assembled: " in shown(window.messages))
+    assert "instructions" in shown(window.messages)
+    assert "AssembledProgram(" not in shown(window.messages)
 
 
 def test_a_question_that_failed_is_said_in_the_messages(window, turning):
