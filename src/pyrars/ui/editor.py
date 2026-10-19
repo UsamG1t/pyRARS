@@ -307,8 +307,15 @@ class Editor(Gtk.Box):
             for one in by_file.get(page.path, ()):
                 page.mark(one.kind, one.line, one.message)
 
-    def here(self, path: str | None, line: int) -> None:
-        """Where the machine stands, in the margin of the right file."""
+    def here(self, path: str | None, line: int, follow: bool = True) -> None:
+        """Where the machine stands, in the margin of the right file.
+
+        The mark is always put; the file is brought forward and scrolled to only
+        when asked. A window that scrolled after every snapshot of a running
+        program would be unreadable - and a view that is not on the screen yet
+        defers a scroll through the main loop, which a run without an end then
+        keeps alive for ever.
+        """
         for page in self.pages:
             page.unmark("here")
         if not path:
@@ -316,10 +323,11 @@ class Editor(Gtk.Box):
         for page in self.pages:
             if page.path == path:
                 page.mark("here", line)
-                self.tabs.set_selected_page(self.tabs.get_page(page))
-                page.view.scroll_to_iter(
-                    page.buffer.get_iter_at_line(max(line - 1, 0))[1],
-                    0.2, False, 0.0, 0.0)
+                if follow:
+                    self.tabs.set_selected_page(self.tabs.get_page(page))
+                    page.view.scroll_to_iter(
+                        page.buffer.get_iter_at_line(max(line - 1, 0))[1],
+                        0.2, False, 0.0, 0.0)
 
     # ------------------------------------------------------------ the telling
 

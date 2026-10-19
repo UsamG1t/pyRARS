@@ -368,6 +368,10 @@ class RunController:
             return
         self._said = now
         self.tell(self._shot())
+        # And give way. The loop of the machine is Python, so it holds the
+        # interpreter until it is taken from it; whoever is being told these
+        # snapshots has to be able to answer a pointer while they arrive.
+        time.sleep(0)
 
     def _shot(self, stopped: Stopped | None = None) -> Snapshot:
         """Where the run is now."""

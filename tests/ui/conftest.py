@@ -36,7 +36,12 @@ def turning(gtk):
     def turn(whether, timeout: float = 5.0) -> bool:
         end = time.monotonic() + timeout
         while time.monotonic() < end:
-            while gtk.pending():
+            # A bounded number of events at a time: a program without an end keeps
+            # the loop fed for ever, and a drain that waited for quiet would never
+            # look at the clock again (stage 45).
+            for _ in range(500):
+                if not gtk.pending():
+                    break
                 gtk.iteration(False)
             if whether():
                 return True

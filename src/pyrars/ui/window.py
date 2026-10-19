@@ -17,11 +17,14 @@ gi.require_version("Adw", "1")
 from gi.repository import Adw, Gio, GLib, Gtk  # noqa: E402 - after require_version
 
 from pyrars.session.control import (  # noqa: E402
-    ASKING, LOAD, NOTHING, WAITING, Answer, Failed, RunController, Snapshot)
+    ASKING, ENDED, LOAD, NOTHING, RUNNING, STANDING, WAITING, Answer, Failed,
+    RunController, Snapshot)
 from pyrars.session import project as projects  # noqa: E402
 from pyrars.session.project import Project  # noqa: E402
 from pyrars.ui import actions, shown  # noqa: E402
 from pyrars.ui.editor import Editor  # noqa: E402
+from pyrars.ui.table import Table  # noqa: E402
+from pyrars.values import VALUE_FORMATS  # noqa: E402
 
 
 class Writing:
@@ -64,7 +67,16 @@ class Window(Adw.ApplicationWindow):
         self.editor = Editor(cache)
         self.editor.watchers.append(self._files_changed)
         self.editor.marked.append(self._breakpoint_changed)
-        self.standing = _telling()
+        self.format = "hex"
+        self.program = None
+        self.standing = Gtk.Label(xalign=0.0, selectable=True)
+        self.standing.add_css_class("monospace")
+        self.views_of = {
+            "registers": Table(shown.REGISTERS), "floats": Table(shown.FLOATS),
+            "control": Table(shown.CONTROL), "text": Table(shown.TEXT),
+            "data": Table(shown.DATA), "labels": Table(shown.LABELS),
+            "frames": Table(shown.FRAMES),
+        }
         self.console = _telling()
         self.messages = _telling()
         self.set_content(self._built())
@@ -99,7 +111,21 @@ class Window(Adw.ApplicationWindow):
             doing.append(self._button(action))
         header.pack_start(doing)
         header.pack_end(self._menu())
+        header.pack_end(self._formats())
         return header
+
+    def _formats(self) -> Gtk.Widget:
+        """How every value of the machine is written, which is one choice for all
+        of them: a person reading a register in hexadecimal is reading memory in
+        hexadecimal too."""
+        chooser = Gtk.DropDown.new_from_strings(list(VALUE_FORMATS))
+        chooser.set_tooltip_text("How values are written")
+        chooser.connect("notify::selected", self._format_chosen)
+        return chooser
+
+    def _format_chosen(self, chooser, parameter) -> None:
+        self.format = VALUE_FORMATS[chooser.get_selected()]
+        self._views_again()
 
     def _button(self, action: actions.Action, icon: str | None = None) -> Gtk.Button:
         button = (Gtk.Button(icon_name=icon) if icon
@@ -127,8 +153,8 @@ class Window(Adw.ApplicationWindow):
     def _panes(self) -> Gtk.Widget:
         upper = Gtk.Paned(orientation=Gtk.Orientation.HORIZONTAL)
         upper.set_start_child(self.editor)
-        upper.set_end_child(_in_a_frame(self.standing, "Machine"))
-        upper.set_position(720)
+        upper.set_end_child(self._machine())
+        upper.set_position(700)
         upper.set_resize_start_child(True)
         whole = Gtk.Paned(orientation=Gtk.Orientation.VERTICAL)
         whole.set_start_child(upper)
@@ -137,9 +163,27 @@ class Window(Adw.ApplicationWindow):
         whole.set_resize_start_child(True)
         return whole
 
+    def _machine(self) -> Gtk.Widget:
+        """Where the run is, and the three files of registers under it."""
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+        self.standing.set_margin_start(8)
+        self.standing.set_margin_top(6)
+        self.standing.set_margin_bottom(6)
+        box.append(self.standing)
+        pages = Gtk.Notebook()
+        for name, title in (("registers", "Registers"), ("floats", "Floats"),
+                            ("control", "Control")):
+            pages.append_page(self.views_of[name], Gtk.Label(label=title))
+        box.append(pages)
+        return box
+
     def _views(self) -> Gtk.Widget:
         self.views = Gtk.Notebook()
-        self.views.append_page(self._console(), Gtk.Label(label="Console"))
+        for name, title in (("text", "Text"), ("data", "Data"),
+                            ("labels", "Labels"), ("frames", "Frames")):
+            self.views.append_page(self.views_of[name], Gtk.Label(label=title))
+        self.console_page = self.views.append_page(self._console(),
+                                                   Gtk.Label(label="Console"))
         self.views.append_page(_scrolled(self.messages), Gtk.Label(label="Messages"))
         return self.views
 
@@ -284,6 +328,12 @@ class Window(Adw.ApplicationWindow):
             elif event.what == BREAKS:
                 self._breaks_that_missed(event.value)
                 return GLib.SOURCE_REMOVE
+            elif event.what == REGISTERS:
+                self._registers_shown(event.value)
+                return GLib.SOURCE_REMOVE
+            elif event.what == PLACES:
+                self._places_shown(event.value)
+                return GLib.SOURCE_REMOVE
             self._said(f"{event.what}: {_short(event.value)}")
         elif isinstance(event, Failed):
             self._said(f"{event.what} failed: {event.message}")
@@ -295,6 +345,12 @@ class Window(Adw.ApplicationWindow):
         """What the assembler said, into the margins of the files it said it
         about; what it said about no place at all, into the messages."""
         by_file, loose = shown.problems(program.diagnostics)
+        self.program = None if program.failed else program
+        if program.failed:
+            self.here = None  # there is no machine to stand anywhere
+        # And where it DOES stand is not touched here: the snapshot of the session
+        # being built came before this answer did, and it is the one that knows.
+        self._text_again()
         self.editor.problems(by_file)
         self.editor.labels = tuple(program.symbols)
         for message in loose:
@@ -324,29 +380,82 @@ class Window(Adw.ApplicationWindow):
 
     def _breaks_that_missed(self, missed) -> None:
         """A line with no instruction on it cannot be stopped before, so the mark
-        comes off again and the person is told why."""
+        comes off again and the person is told why.
+
+        Whatever came of them, the text segment is written again: it shows what the
+        run stops before, and that is what has just changed.
+        """
+        self._text_again()
         for path, line in missed:
             for page in self.editor.pages:
                 if page.path == path and line in page.marked("breakpoint"):
                     page.toggle(line)
             self._said(f"{_short(path)}:{line}: no instruction of the program is "
                        "there, so nothing can stop before it")
+        if missed:
+            self._text_again()
 
     def _shown(self, shot: Snapshot) -> None:
-        """Where the machine stands, as much of it as a skeleton shows."""
-        lines = [f"state        {shot.state}"]
-        if shot.place is not None:
-            lines += [f"pc           0x{shot.place.address:08x}",
-                      f"instruction  {shot.place.basic}",
-                      f"source       {shot.place.source.strip()}"]
-        lines += [f"instructions {shot.instructions}",
-                  f"turns        {shot.turns}",
-                  f"back         {shot.back}"]
-        if shot.stopped is not None:
-            lines.append(f"stopped      {shot.stopped.reason}")
-        self.standing.get_buffer().set_text("\n".join(lines))
+        """Where the machine stands, and everything that follows from it.
+
+        While the machine RUNS, this does as little as it can: the line that says
+        where the run is, and nothing else. The thread of the run holds the
+        interpreter nearly all the time - a loop of a million instructions a second
+        is a loop of Python - so every call this thread makes waits its turn, and a
+        window that rebuilt its tables thirty times a second would answer the
+        pointer in half a second instead of at once. Nothing of what is left out
+        could be read at that speed anyway; it is all put up the moment the machine
+        stands still.
+        """
+        self.standing.set_text(shown.standing(shot))
+        if shot.state == RUNNING:
+            return
         place = shot.place
         self.editor.here(place.file if place else None, place.line if place else 0)
+        self.here = place.address if place is not None else None
+        if self.session_is_open:
+            self.control.ask(REGISTERS, _of_the_registers)
+            if shot.state in (STANDING, ENDED):
+                # A run that waits for a line is in no state to answer questions:
+                # the thread is standing in the input, and the asking would only
+                # queue behind it.
+                self.control.ask(PLACES, _of_the_places)
+        self._text_again()
+
+    def _registers_shown(self, values: dict) -> None:
+        self.views_of["registers"].show(
+            shown.registers(values["registers"], self.format))
+        self.views_of["floats"].show(shown.floats(values["floats"], self.format))
+        self.views_of["control"].show(shown.control(values["control"], self.format))
+
+    def _places_shown(self, values: dict) -> None:
+        self.views_of["data"].show(shown.data(values["data"], self.format))
+        self.views_of["labels"].show(shown.labels(values["labels"]))
+        self.views_of["frames"].show(shown.frames(values["frames"]))
+
+    def _text_again(self) -> None:
+        """The text segment: the program itself, with the place the machine stands
+        on and the places it stops before marked."""
+        if self.program is None:
+            return
+        breaks = {entry.address for entry in self.program.text
+                  for page in self.editor.pages
+                  if page.path and entry.loc is not None
+                  and entry.loc.file == page.path
+                  and entry.loc.line in page.marked("breakpoint")}
+        self.views_of["text"].show(
+            shown.text(self.program.text, self.here, breaks, self.format))
+
+    def _views_again(self) -> None:
+        """Everything again, in the format now chosen."""
+        self._text_again()
+        if self.session_is_open:
+            self.control.ask(REGISTERS, _of_the_registers)
+            self.control.ask(PLACES, _of_the_places)
+
+    @property
+    def session_is_open(self) -> bool:
+        return self.state != NOTHING
 
     def _typed(self) -> None:
         """A line for the program. It may be typed before the program asks for it,
@@ -359,7 +468,7 @@ class Window(Adw.ApplicationWindow):
     def _waiting_for_a_line(self) -> None:
         """The program has asked for something: the console is where the answer
         goes, so that is what the window shows, with the cursor already in it."""
-        self.views.set_current_page(0)
+        self.views.set_current_page(self.console_page)
         self.typing.grab_focus()
 
     def _said(self, line: str) -> None:
@@ -382,6 +491,20 @@ class Window(Adw.ApplicationWindow):
 
 # What the window asks the session for under its own name.
 BREAKS = "breaks"
+REGISTERS = "the registers"
+PLACES = "the places"
+
+
+def _of_the_registers(session) -> dict:
+    """The three files of registers, in one asking: a question of its own for each
+    would be three turns of the queue for one snapshot."""
+    return {"registers": session.registers(), "floats": session.floats(),
+            "control": session.csr()}
+
+
+def _of_the_places(session) -> dict:
+    return {"data": session.data(), "labels": session.symbols(),
+            "frames": session.frames()}
 
 # What the line under the console says when nothing is in it.
 _TYPE_HERE = "A line for the program"

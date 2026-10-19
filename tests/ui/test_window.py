@@ -10,7 +10,13 @@ from pathlib import Path
 
 import pytest
 
-from pyrars.session import project as projects
+import gi
+
+gi.require_version("Gtk", "4.0")
+
+from gi.repository import Gtk  # noqa: E402
+
+from pyrars.session import project as projects  # noqa: E402
 
 pytestmark = pytest.mark.ui
 
@@ -77,6 +83,9 @@ def sensible(window) -> set[str]:
 
 
 def shown(view) -> str:
+    """What a view of text holds; a label is asked for its text instead."""
+    if isinstance(view, Gtk.Label):
+        return view.get_text()
     buffer = view.get_buffer()
     return buffer.get_text(buffer.get_start_iter(), buffer.get_end_iter(), False)
 
@@ -108,8 +117,8 @@ def test_the_program_is_open_in_the_editor_before_anything_is_assembled(window):
 def test_a_program_assembled(window, turning):
     window.do("assemble")
     assert turning(lambda: window.state == "standing")
-    assert "pc           0x00400000" in shown(window.standing)
-    assert "instructions 0" in shown(window.standing)
+    assert "0x00400000" in window.standing.get_text()
+    assert "0 carried out" in window.standing.get_text()
     assert sensible(window) >= {"assemble", "continue", "step", "over", "finish",
                                 "restart"}
     assert not sensible(window) & {"pause", "stop", "back"}
@@ -119,8 +128,8 @@ def test_a_step_and_what_the_window_says_of_it(window, turning):
     window.do("assemble")
     assert turning(lambda: window.state == "standing")
     window.do("step")
-    assert turning(lambda: "instructions 1" in shown(window.standing))
-    assert "stopped      stepped" in shown(window.standing)
+    assert turning(lambda: "1 carried out" in window.standing.get_text())
+    assert "stepped" in window.standing.get_text()
     assert "back" in sensible(window)  # there is something to take back now
 
 
@@ -131,7 +140,7 @@ def test_a_step_back(window, turning):
     assert turning(lambda: window.journal == 1)
     window.do("back")
     assert turning(lambda: window.journal == 0)
-    assert "instructions 0" in shown(window.standing)
+    assert "0 carried out" in window.standing.get_text()
     assert "back" not in sensible(window)  # and nothing left to take back
 
 
@@ -140,8 +149,8 @@ def test_a_run_to_its_end(window, turning):
     assert turning(lambda: window.state == "standing")
     window.do("continue")
     assert turning(lambda: window.state == "ended")
-    assert f"instructions {WHOLE}" in shown(window.standing)
-    assert "stopped      exited" in shown(window.standing)
+    assert f"{WHOLE} carried out" in window.standing.get_text()
+    assert "exited" in window.standing.get_text()
     assert sensible(window) >= {"assemble", "restart", "back"}
     assert not sensible(window) & {"step", "continue", "over", "finish", "pause"}
 
@@ -165,7 +174,7 @@ def test_a_run_is_not_ended_by_a_stop_it_never_heard(window, turning):
     assert turning(lambda: window.state == "standing")
     window.do("stop")  # not possible: the machine is standing still
     window.do("step")
-    assert turning(lambda: "instructions 1" in shown(window.standing))
+    assert turning(lambda: "1 carried out" in window.standing.get_text())
     assert window.state == "standing"
 
 
@@ -176,7 +185,7 @@ def test_a_restart(window, turning):
     assert turning(lambda: window.state == "ended")
     window.do("restart")
     assert turning(lambda: window.state == "standing")
-    assert "instructions 0" in shown(window.standing)
+    assert "0 carried out" in window.standing.get_text()
 
 
 # ------------------------------------------------ the program asks for a line
@@ -188,7 +197,7 @@ def test_a_program_waiting_says_so_and_can_only_be_stopped(window, turning):
     assert turning(lambda: window.state == "standing")
     window.do("continue")
     assert turning(lambda: window.state == "waiting")
-    assert "waiting" in shown(window.standing)
+    assert "waiting" in window.standing.get_text()
     assert "waiting for a line" in window.typing.get_placeholder_text()
     assert sensible(window) & {"pause", "step", "continue", "restart"} == set()
     assert "stop" in sensible(window)
@@ -214,11 +223,11 @@ def test_what_is_typed_goes_to_the_program_and_into_the_console(window, turning)
 
 @pytest.mark.parametrize("window", [ASKS], indirect=True)
 def test_the_console_is_brought_forward_when_the_program_asks(window, turning):
-    window.views.set_current_page(1)  # looking at the messages
+    window.views.set_current_page(0)  # looking at the text segment
     window.do("assemble")
     assert turning(lambda: window.state == "standing")
     window.do("continue")
-    assert turning(lambda: window.views.get_current_page() == 0)
+    assert turning(lambda: window.views.get_current_page() == window.console_page)
 
 
 @pytest.mark.parametrize("window", [ASKS], indirect=True)
@@ -291,7 +300,7 @@ def test_a_breakpoint_put_in_the_margin_stops_the_run(window, turning):
     assert turning(lambda: True)
     window.do("continue")
     assert turning(lambda: window.state == "standing"
-                   and "breakpoint" in shown(window.standing))
+                   and "breakpoint" in window.standing.get_text())
     assert page.marked("here") == [7]  # and the margin says where it stands
 
 
@@ -327,7 +336,7 @@ def test_the_breakpoints_of_the_margin_are_given_to_a_program_as_it_is_assembled
     window.do("assemble")
     assert turning(lambda: window.state == "standing")
     window.do("continue")
-    assert turning(lambda: "breakpoint" in shown(window.standing))
+    assert turning(lambda: "breakpoint" in window.standing.get_text())
 
 
 def test_the_margin_follows_the_machine(window, turning):
@@ -356,7 +365,7 @@ def test_what_is_on_the_screen_is_what_is_assembled(window, turning):
     assert window.editor.modified is False  # it was saved on the way
     assert "li t0, 9" in Path(page.path).read_text()
     window.do("step")
-    assert turning(lambda: "instructions 1" in shown(window.standing))
+    assert turning(lambda: "1 carried out" in window.standing.get_text())
     window.control.ask("t0", lambda session: session.registers(("t0",))[0].value)
     assert turning(lambda: "t0: 9" in shown(window.messages))
 
@@ -422,3 +431,120 @@ def test_a_question_that_failed_is_said_in_the_messages(window, turning):
 def test_a_question_asked_before_a_program_is_open(window, turning):
     window.control.ask("where", lambda session: session.where())
     assert turning(lambda: "where failed: no program is open" in shown(window.messages))
+
+
+# ------------------------------------------------------ the views of the machine
+
+
+def test_the_registers_are_shown_as_soon_as_a_program_is_open(window, turning):
+    window.do("assemble")
+    assert turning(lambda: any(row[0] == "t0"
+                               for row in window.views_of["registers"].rows))
+    rows = {row[0]: row for row in window.views_of["registers"].rows}
+    assert len(rows) == 32
+    assert rows["zero"] == ("zero", "x0", "0x00000000")
+    assert len(window.views_of["floats"].rows) == 32
+    assert any(row[0] == "fcsr" for row in window.views_of["control"].rows)
+
+
+def test_the_registers_follow_the_machine(window, turning):
+    window.do("assemble")
+    assert turning(lambda: window.state == "standing")
+    window.do("step")  # li t0, 3
+    assert turning(lambda: _row(window, "registers", "t0")[2] == "0x00000003")
+    window.do("back")
+    assert turning(lambda: _row(window, "registers", "t0")[2] == "0x00000000")
+
+
+def test_the_text_segment_is_the_program_with_its_places_marked(window, turning):
+    from pyrars.ui.shown import BREAK, HERE
+
+    window.do("assemble")
+    assert turning(lambda: window.state == "standing")
+    rows = window.views_of["text"].rows
+    assert rows[0][1] == "0x00400000"
+    assert rows[0][3].startswith("addi")  # the basic form of what was written
+    assert rows[0][0] == HERE  # and the machine is at the beginning
+    window.editor.toggle_breakpoint(window.editor.page, 7)
+    assert turning(lambda: any(BREAK in row[0] for row in window.views_of["text"].rows))
+
+
+def test_the_data_the_labels_and_the_frames(window, turning):
+    window.do("assemble")
+    assert turning(lambda: window.views_of["labels"].rows != [])
+    assert ("main", "0x00400000", "global") in window.views_of["labels"].rows
+    assert any(row[1] == ".word" for row in window.views_of["data"].rows)
+    assert window.views_of["frames"].rows == []  # it is inside no call yet
+    window.editor.toggle_breakpoint(window.editor.page, 7)
+    assert turning(lambda: True)
+    window.do("continue")
+    assert turning(lambda: window.views_of["data"].rows != [])
+    # the one word the program keeps is there, wherever the run has got to
+    assert any(row[0] == "0x10010000" for row in window.views_of["data"].rows)
+
+
+def test_what_a_run_wrote_shows_in_the_data(window, turning):
+    window.do("assemble")
+    assert turning(lambda: window.state == "standing")
+    window.do("continue")
+    assert turning(lambda: window.state == "ended")
+    kept = [row for row in window.views_of["data"].rows if row[0] == "0x10010000"]
+    assert kept and kept[0][3] == "0x00000006"  # 3 + 2 + 1, as the loop counts down
+
+
+def test_the_format_chosen_reaches_every_view(window, turning):
+    window.do("assemble")
+    assert turning(lambda: _row(window, "registers", "t0") is not None)
+    window.do("step")
+    assert turning(lambda: _row(window, "registers", "t0")[2] == "0x00000003")
+    window.format = "dec"
+    window._views_again()
+    assert turning(lambda: _row(window, "registers", "t0")[2] == "3")
+    assert all(not row[2].startswith("0x") for row in window.views_of["text"].rows)
+
+
+def test_the_views_are_left_alone_while_the_machine_runs(gtk, tmp_path, turning):
+    """While the machine runs, the window does the least it can.
+
+    The thread of the run holds the interpreter nearly all the time - a loop of a
+    million instructions a second is a loop of Python - so every call this thread
+    makes waits its turn. A window that rebuilt its tables thirty times a second
+    answered the pointer in half a second instead of at once; measured at six
+    hundred milliseconds a snapshot before this, and under forty after.
+
+    Nothing of what is left out could be read at that speed anyway, and all of it
+    is put up the moment the machine stands still.
+    """
+    from pyrars.ui.window import Window
+
+    (tmp_path / "main.s").write_text(
+        ".globl main\n.text\nmain: li t0, 0\nloop: addi t0, t0, 1\n      j loop\n")
+    made = Window(files=(str(tmp_path / "main.s"),), cache=str(tmp_path / "cache"))
+    try:
+        made.do("assemble")
+        assert turning(lambda: made.state == "standing")
+        asked = len(made.views_of["labels"].rows)
+        registers = len(made.views_of["registers"].rows)
+        assert asked and registers
+        made.do("continue")
+        assert turning(lambda: made.state == "running")
+        for name in ("labels", "registers", "text"):
+            made.views_of[name].show([])  # nothing fills them again while it runs
+        assert turning(lambda: True)
+        assert [made.views_of[name].rows for name in ("labels", "registers", "text")] \
+            == [[], [], []]
+        # and the line that says where the run is DOES keep moving
+        assert "running" in made.standing.get_text()
+        made.do("pause")
+        assert turning(lambda: len(made.views_of["labels"].rows) == asked)
+        assert len(made.views_of["registers"].rows) == registers
+        assert made.views_of["text"].rows != []
+    finally:
+        made.close_up()
+
+
+def _row(window, which: str, name: str):
+    for row in window.views_of[which].rows:
+        if row[0] == name:
+            return row
+    return None

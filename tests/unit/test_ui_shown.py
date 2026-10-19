@@ -67,3 +67,126 @@ def test_what_the_margin_of_a_line_says():
     assert said([Problem(3, ERROR, "nothing of the kind"),
                  Problem(3, WARNING, "and this too")]) == (
         "error: nothing of the kind\nwarning: and this too")
+
+
+# ------------------------------------------------- the views of the machine
+
+from pyrars.session.control import Snapshot  # noqa: E402
+from pyrars.session.debug import (  # noqa: E402
+    FrameSeen, Item, Place, Stopped, Symbol, Value)
+from pyrars.isa.program import TextEntry  # noqa: E402
+from pyrars.ui.shown import (  # noqa: E402
+    BREAK, HERE, control, data, floats, frames, labels, registers, standing, text)
+
+
+def test_which_cell_goes_in_which_column():
+    from pyrars.ui.shown import cell
+
+    assert cell(("a", "b", "c"), 1) == "b"
+    # a row may be shorter than the table is wide, and a column shows something
+    # either way: a place with no source line, a frame with no name
+    assert cell(("a",), 2) == ""
+    assert cell((), 0) == ""
+
+
+def test_the_registers_as_rows():
+    assert registers([Value("t0", 5, 0x1234, 32), Value("zero", 0, 0, 32)]) == (
+        ("t0", "x5", "0x00001234"), ("zero", "x0", "0x00000000"))
+
+
+def test_the_registers_in_the_format_chosen():
+    assert registers([Value("t0", 5, 0xFFFFFFFF, 32)], "dec")[0][2] == "-1"
+    assert registers([Value("t0", 5, 0x41424344, 32)], "ascii")[0][2] == "  A  B  C  D"
+
+
+def test_a_register_of_a_wider_machine_shows_every_digit():
+    assert registers([Value("t0", 5, 1, 64)])[0][2] == "0x0000000000000001"
+
+
+def test_the_floating_point_registers_show_their_bits_as_bits():
+    """A float read as a signed number says nothing to anybody, so the bits are
+    bits whatever format was chosen for the rest."""
+    value = Value("ft1", 1, 0x3FF0000000000000, 64, "1.0", "f")
+    assert floats([value], "dec") == (
+        ("ft1", "f1", "0x3ff0000000000000", "1.0"),)
+
+
+def test_the_control_registers_spell_out_what_they_hold():
+    """Which is what the "flags" of another machine would be (the entry of M8)."""
+    value = Value("fcsr", 3, 0x8, 32, "flags 0x08, rounding 0", "csr")
+    assert control([value]) == (
+        ("fcsr", "0x003", "0x00000008", "flags 0x08, rounding 0"),)
+
+
+def entry(address: int, basic: str, source: str) -> TextEntry:
+    return TextEntry(address, 0x13, basic, None, source)
+
+
+def test_the_text_segment_as_rows():
+    assert text([entry(0x400000, "addi x5,x0,3", "main:   li t0, 3")]) == (
+        ("", "0x00400000", "0x00000013", "addi x5,x0,3", "main:   li t0, 3"),)
+
+
+def test_the_text_segment_marks_where_the_machine_stands():
+    rows = text([entry(0x400000, "a", "a"), entry(0x400004, "b", "b")],
+                here=0x400004)
+    assert [row[0] for row in rows] == ["", HERE]
+
+
+def test_the_text_segment_marks_what_the_run_stops_before():
+    rows = text([entry(0x400000, "a", "a"), entry(0x400004, "b", "b")],
+                breaks={0x400000})
+    assert [row[0] for row in rows] == [BREAK, ""]
+
+
+def test_a_place_that_is_both_is_marked_as_both():
+    rows = text([entry(0x400000, "a", "a")], here=0x400000, breaks={0x400000})
+    assert rows[0][0] == BREAK + HERE
+
+
+def test_the_data_segment_as_the_directives_wrote_it():
+    items = [Item(0x10010000, ".word", 4, (3,)),
+             Item(0x10010004, ".asciz", 3, (0x6968,), "hi")]
+    assert data(items) == (
+        ("0x10010000", ".word", "4", "0x00000003", ""),
+        # three bytes are shown as three bytes, not padded out to a word
+        ("0x10010004", ".asciz", "3", "0x006968", "hi"))
+
+
+def test_the_data_segment_in_the_format_chosen():
+    assert data([Item(0x10010000, ".word", 4, (65,))], "dec")[0][3] == "65"
+
+
+def test_a_thing_of_several_words():
+    assert data([Item(0x10010000, ".space", 8, (1, 2))])[0][3] == (
+        "0x00000001 0x00000002")
+
+
+def test_the_labels_say_how_far_they_reach():
+    assert labels([Symbol("main", 0x400000, True), Symbol("loop", 0x400010, False)]) == (
+        ("main", "0x00400000", "global"), ("loop", "0x00400010", "local"))
+
+
+def place(address: int, symbol: str = "") -> Place:
+    return Place(address, symbol=symbol)
+
+
+def test_the_frames_of_the_calls_the_run_is_inside():
+    assert frames([FrameSeen(1, place(0x400034, "keep"), place(0x400024), 0x7FFFEFFC)]) == (
+        ("1", "0x00400034 <keep>", "0x00400024", "0x7fffeffc"),)
+
+
+def test_a_frame_whose_stack_pointer_nobody_saw():
+    assert frames([FrameSeen(1, place(0x400034), place(0x400024), None)])[0][3] == "?"
+
+
+def test_the_line_that_says_where_the_run_is():
+    shot = Snapshot("standing", Place(0x400010, basic="lw x28,0(x5)"), 7, 7, 7,
+                    Stopped("breakpoint", Place(0x400010)))
+    assert standing(shot) == (
+        "standing  |  0x00400010  |  lw x28,0(x5)  |  7 carried out  |  "
+        "7 to take back  |  breakpoint")
+
+
+def test_the_line_before_anything_is_open():
+    assert standing(Snapshot("nothing")) == "nothing  |  0 carried out"
