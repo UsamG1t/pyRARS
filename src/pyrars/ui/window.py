@@ -70,6 +70,10 @@ class Window(Adw.ApplicationWindow):
         self.editor.watchers.append(self._files_changed)
         self.editor.marked.append(self._breakpoint_changed)
         self.format = "hex"
+        # How many instructions a second the run is allowed, or nothing at all for
+        # as fast as it can; a slowed run is one somebody is watching, and the
+        # window keeps every view up to date while it goes.
+        self.speed = None
         self.program = None
         # Where the project came from, when one was opened from a file; a project
         # made in the window has nowhere yet.
@@ -125,7 +129,35 @@ class Window(Adw.ApplicationWindow):
         header.pack_start(doing)
         header.pack_end(self._menu())
         header.pack_end(self._formats())
+        header.pack_end(self._speeds())
         return header
+
+    def _speeds(self) -> Gtk.Widget:
+        """How fast the run goes.
+
+        A machine at its own speed cannot be watched - a loop of Python still
+        carries out a hundred thousand instructions a second - so the one way to
+        see a program work is to tell it to go slowly. The choice holds while the
+        run goes on: it is read again every turn of the loop.
+        """
+        self.how_fast = Gtk.DropDown.new_from_strings(
+            [shown.speed_text(speed) for speed in shown.SPEEDS])
+        self.how_fast.set_tooltip_text("How fast the run goes")
+        self.how_fast.connect("notify::selected", self._speed_chosen)
+        return self.how_fast
+
+    def _speed_chosen(self, chooser, parameter) -> None:
+        """A speed, now and for the run that is already going.
+
+        While a run is slow the window asks for nothing - a question would wait in
+        the queue behind the movement, and the movement is not going to end - so
+        the questions are given to the controller to answer with every snapshot it
+        sends instead.
+        """
+        self.speed = shown.SPEEDS[chooser.get_selected()]
+        self.control.speed = self.speed
+        self.control.watching = {} if self.speed is None else {
+            REGISTERS: _of_the_registers, PLACES: _of_the_places}
 
     def _formats(self) -> Gtk.Widget:
         """How every value of the machine is written, which is one choice for all
@@ -240,6 +272,9 @@ class Window(Adw.ApplicationWindow):
             self.clear_console()
             self._assembled()
             return
+        if name == "until":
+            self._on_to_the_cursor()
+            return
         if name == "restart":
             self.clear_console()
         getattr(self.control, {"continue": "carry_on"}.get(name, name))()
@@ -295,6 +330,22 @@ class Window(Adw.ApplicationWindow):
         self._said(f"assembling {shown.name_of(page.path)}")
         self.control.load(projects.of([page.path],
                                       folder=str(Path(page.path).parent)))
+
+    def _on_to_the_cursor(self) -> None:
+        """Carry on to the line being looked at, and no further.
+
+        This is the one movement that comes from the editor and not from the
+        machine, so the line is turned into a place the session can find - the
+        file and the line - and the finding is done in the thread of the run. A
+        line with no instruction on it cannot be run to, and the session says so
+        in the same words it says it of a breakpoint, because it is the same
+        question asked twice.
+        """
+        where = self.editor.where_the_cursor_is()
+        if where is None:
+            self._said("nothing to run to: this file is not saved anywhere yet")
+            return
+        self.control.until(f"{where[0]}:{where[1]}")
 
     def open_the_reference(self) -> HelpWindow:
         """Everything that can be written in a program, for looking something up
@@ -470,27 +521,38 @@ class Window(Adw.ApplicationWindow):
     def _shown(self, shot: Snapshot) -> None:
         """Where the machine stands, and everything that follows from it.
 
-        While the machine RUNS, this does as little as it can: the line that says
-        where the run is, and nothing else. The thread of the run holds the
-        interpreter nearly all the time - a loop of a million instructions a second
-        is a loop of Python - so every call this thread makes waits its turn, and a
-        window that rebuilt its tables thirty times a second would answer the
-        pointer in half a second instead of at once. Nothing of what is left out
-        could be read at that speed anyway; it is all put up the moment the machine
-        stands still.
+        While the machine RUNS AT ITS OWN SPEED, this does as little as it can: the
+        line that says where the run is, and nothing else. The thread of the run
+        holds the interpreter nearly all the time - a loop of a million
+        instructions a second is a loop of Python - so every call this thread makes
+        waits its turn, and a window that rebuilt its tables thirty times a second
+        would answer the pointer in half a second instead of at once. Nothing of
+        what is left out could be read at that speed anyway; it is all put up the
+        moment the machine stands still.
+
+        A SLOWED run is the opposite case, and the reason anybody slows one: the
+        thread of the run sleeps between instructions, so there is time to show
+        everything, and watching is the whole point. The views are put up as they
+        are when the machine stands still - from the answers the controller is
+        carrying with its snapshots - but the editor is not scrolled to the line,
+        because a window that jumped about thirty times a second could not be read.
         """
         self.standing.set_text(shown.standing(shot))
-        if shot.state == RUNNING:
+        running = shot.state == RUNNING
+        if running and self.speed is None:
             return
         place = shot.place
-        self.editor.here(place.file if place else None, place.line if place else 0)
+        self.editor.here(place.file if place else None, place.line if place else 0,
+                         follow=not running)
         self.here = place.address if place is not None else None
-        if self.session_is_open:
+        if self.session_is_open and not running:
+            # Nothing is asked of a run that is going: the question would wait in
+            # the queue behind the movement, and a movement nobody stops does not
+            # end. What a slowed run shows comes from `control.watching`.
             self.control.ask(REGISTERS, _of_the_registers)
             if shot.state in (STANDING, ENDED):
-                # A run that waits for a line is in no state to answer questions:
-                # the thread is standing in the input, and the asking would only
-                # queue behind it.
+                # A run that waits for a line is in no state to answer questions
+                # either: the thread is standing in the input.
                 self.control.ask(PLACES, _of_the_places)
         self._text_again()
 

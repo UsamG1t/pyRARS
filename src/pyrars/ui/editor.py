@@ -139,6 +139,11 @@ class Page(Gtk.Box):
     def modified(self) -> bool:
         return self.buffer.get_modified()
 
+    @property
+    def cursor_line(self) -> int:
+        """The line the cursor is in, counted from one as a person counts."""
+        return self.buffer.get_iter_at_mark(self.buffer.get_insert()).get_line() + 1
+
     # ------------------------------------------------------------- the margin
 
     def mark(self, category: str, line: int, says: str = "") -> None:
@@ -326,9 +331,8 @@ class Editor(Gtk.Box):
         page = self.page
         if page is None:
             return None
-        line = page.buffer.get_iter_at_mark(page.buffer.get_insert()).get_line() + 1
-        self.toggle_breakpoint(page, line)
-        return line
+        self.toggle_breakpoint(page, page.cursor_line)
+        return page.cursor_line
 
     def toggle_breakpoint(self, page: Page, line: int) -> bool:
         """Put a breakpoint on a line or take it off, and tell whoever is watching
@@ -337,6 +341,17 @@ class Editor(Gtk.Box):
         for watcher in self.marked:
             watcher(page, line, on)
         return on
+
+    def where_the_cursor_is(self) -> tuple[str, int] | None:
+        """The file and the line the cursor is in, for the one action that is about
+        the place being LOOKED at rather than about the run - or nothing, when what
+        is being looked at is not on the disk, since the program the machine was
+        given is the file and not the buffer.
+        """
+        page = self.page
+        if page is None or not page.path:
+            return None
+        return (page.path, page.cursor_line)
 
     def breakpoints(self) -> list[tuple[str, int]]:
         """Every breakpoint the person has put in, as a file and a line."""

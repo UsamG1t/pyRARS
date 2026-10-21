@@ -316,6 +316,197 @@ def test_a_step_back_reaches_over_a_run_that_was_stopped(control, told, tmp_path
     assert told.last.stopped.reason == "stepped"
 
 
+# ------------------------------------------------------------ on to a place
+
+
+def test_a_run_on_to_a_place_by_its_name(control, told, tmp_path):
+    """A window has a line of a file and not an address, so a place may be said
+    in words; the naming is done in the thread of the run, because that is where
+    the program is."""
+    opened(control, tmp_path)
+    control.until("keep")
+    assert control.settled()
+    assert told.last.place.line == 14  # `keep:   la t0, total`
+    assert told.last.instructions == 2 + 3 * 3 + 1
+
+
+def test_a_run_on_to_a_line_of_a_file(control, told, tmp_path):
+    opened(control, tmp_path)
+    control.until(f"{tmp_path / 'main.s'}:9")  # the `bne` of the first turn
+    assert control.settled()
+    assert told.last.place.line == 9
+    assert told.last.instructions == 4
+
+
+def test_a_run_on_to_an_address(control, told, tmp_path):
+    opened(control, tmp_path)
+    control.until(control.program.symbols["keep"])
+    assert control.settled()
+    assert told.last.place.line == 14
+
+
+def test_a_run_on_to_a_place_that_is_nowhere(control, told, tmp_path):
+    """A line with no instruction on it cannot be run to, and nothing of the run
+    changes because somebody asked."""
+    opened(control, tmp_path)
+    control.until(f"{tmp_path / 'main.s'}:2")  # `.data` is no instruction
+    assert control.settled()
+    assert told.failures[-1].what == "until"
+    assert "no instruction of the program is there" in told.failures[-1].message
+    assert told.last.instructions == 0
+
+
+# --------------------------------------------------------- the speed of a run
+
+
+def test_a_run_is_held_back_to_the_speed_it_was_given(told, tmp_path):
+    """Fifty a second means fifty a second: the whole program is eighteen
+    instructions, so it takes about a third of a second instead of no time at
+    all."""
+    with RunController(told, out=io.StringIO(), speed=50) as control:
+        opened(control, tmp_path)
+        began = time.monotonic()
+        control.carry_on()
+        assert control.settled(20)
+        took = time.monotonic() - began
+    assert told.last.instructions == WHOLE
+    assert took >= (WHOLE - 2) / 50  # the ceiling is kept
+    assert took < 4 * WHOLE / 50  # and nothing waits longer than it was told to
+
+
+def test_the_pace_is_counted_from_when_each_instruction_was_due(told, tmp_path):
+    """What a turn itself took is part of what that turn was given.
+
+    Here half of every interval goes on answering a watched question. A pace
+    counted from NOW instead of from when the last instruction was due would add
+    that half to the whole of every interval and take half as long again - and
+    would go on drifting with anything else the turn had to do.
+    """
+    def slowly(session):
+        time.sleep(0.01)
+        return session.count().instructions
+
+    with RunController(told, out=io.StringIO(), every=0, speed=50) as control:
+        opened(control, tmp_path)
+        control.watching = {"slowly": slowly}
+        began = time.monotonic()
+        control.carry_on()
+        assert control.settled(20)
+        took = time.monotonic() - began
+    assert told.last.instructions == WHOLE
+    assert (WHOLE - 2) / 50 <= took < 1.25 * WHOLE / 50
+
+
+def test_a_step_is_a_step_however_slow_the_run_is(told, tmp_path):
+    """A speed holds a RUN back; it does not make somebody who presses Step wait a
+    second to see what they did.
+
+    The turn is told of an instruction once it has been carried out, so the first
+    turn of every movement waits for nothing: five steps at twenty a second are
+    five steps and no waiting at all.
+    """
+    with RunController(told, out=io.StringIO(), speed=20) as control:
+        opened(control, tmp_path)
+        began = time.monotonic()
+        for _ in range(5):
+            control.step()
+        assert control.settled(20)
+        took = time.monotonic() - began
+    assert told.last.instructions == 5
+    assert took < 5 * 0.05 / 2  # five intervals would be a quarter of a second
+
+
+def test_a_run_at_no_speed_at_all_is_as_fast_as_it_can_be(control, told, tmp_path):
+    """Nothing is held back unless somebody asks for it; the loop pays one
+    comparison a turn for the asking."""
+    opened(control, tmp_path)
+    began = time.monotonic()
+    control.carry_on()
+    assert control.settled()
+    assert time.monotonic() - began < WHOLE / 50
+    assert told.last.instructions == WHOLE
+
+
+def test_a_run_that_stood_still_does_not_race_to_make_up_for_it(told, tmp_path):
+    """A slowed run that waited for a line owes nothing for the waiting.
+
+    The pace is counted from when the last instruction was DUE, so that it does
+    not drift; but a run that has fallen behind begins counting again from now.
+    Otherwise half a second of standing in the input would be repaid at the top
+    speed of the machine, which is the opposite of what a slow run is for.
+    """
+    with RunController(told, out=io.StringIO(), speed=10) as control:
+        opened(control, tmp_path, ASKS)
+        control.carry_on()
+        assert waited_for(lambda: control.state == WAITING)
+        time.sleep(0.5)  # half a second owed: five instructions at this speed
+        answered = time.monotonic()
+        control.answer("7")
+        assert control.settled(20)
+        after = time.monotonic() - answered
+    assert told.last.state == ENDED
+    assert after >= 0.15  # what was left was still carried out at ten a second
+
+
+def test_a_speed_may_be_changed_while_the_run_goes_on(told, tmp_path):
+    """It is read every turn, so a slider may be moved while a program runs."""
+    with RunController(told, out=io.StringIO()) as control:
+        opened(control, tmp_path, FOREVER)
+        control.carry_on()
+        assert waited_for(lambda: told.last.instructions > 1000)  # its own speed
+        control.speed = 5
+        time.sleep(0.2)  # whatever was in the air at the old speed
+        counted = told.last.instructions
+        time.sleep(0.6)
+        crawled = told.last.instructions - counted
+        control.stop()
+        assert control.settled()
+    assert 1 <= crawled <= 10  # three a second there or thereabouts, not thousands
+
+
+# ----------------------------------------------------------- what is watched
+
+
+def test_what_is_watched_is_answered_with_every_snapshot(told, tmp_path):
+    """A window that slows a run down wants to see the machine change, and cannot
+    ask for it while the run goes on: a question would wait in the queue behind
+    the movement. So it is answered by the thread of the run itself."""
+    with RunController(told, out=io.StringIO(), every=0) as control:
+        opened(control, tmp_path)
+        control.watching = {"counted": lambda session: session.count().instructions}
+        control.step(5)
+        assert control.settled()
+    running = [one for one in told.snapshots if one.state == RUNNING]
+    assert [one.value for one in told.answers if one.what == "counted"] \
+        == [1, 2, 3, 4, 5]  # every turn, the instruction of that turn done
+    assert len(running) == 5
+
+
+def test_nothing_is_watched_unless_somebody_asks(control, told, tmp_path):
+    opened(control, tmp_path)
+    control.step(5)
+    assert control.settled()
+    assert control.watching == {}
+    assert [one.what for one in told.answers] == [LOAD]
+
+
+def test_a_watched_question_that_cannot_be_answered_is_let_go(told, tmp_path):
+    """Thirty of the same complaint a second say nothing a window can use, and the
+    run is none the worse for the asking."""
+    def throws(session):
+        raise ValueError("nothing like it")
+
+    with RunController(told, out=io.StringIO(), every=0) as control:
+        opened(control, tmp_path)
+        control.watching = {"broken": throws}
+        control.step(5)
+        assert control.settled()
+        assert control.watching == {}
+    assert [(one.what, one.message) for one in told.failures] \
+        == [("broken", "nothing like it")]
+    assert told.last.state == STANDING and told.last.instructions == 5
+
+
 # ------------------------------------------------------------- the snapshots
 
 

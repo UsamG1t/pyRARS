@@ -13,7 +13,7 @@ between before a run begins.
 
 The keys are RARS's where the action is RARS's (verified in the byte code of
 `VenusUI`: F3 assemble, F5 run, F7 step, F8 backstep, F9 pause, F11 stop, F12
-reset), because a person who comes from RARS should keep their fingers. The two
+reset), because a person who comes from RARS should keep their fingers. The
 actions it has not got took the free keys beside them.
 """
 
@@ -43,6 +43,8 @@ ACTIONS = (
            "instruction", "F3", STILL),
     Action("continue", "Run", "Carry on to a breakpoint, a watchpoint or the end of "
            "the run", "F5", frozenset({STANDING})),
+    Action("until", "To here", "Carry on to the line the cursor is on, and no "
+           "further", "F4", frozenset({STANDING})),
     Action("step", "Step", "Carry out one instruction", "F7",
            frozenset({STANDING})),
     Action("over", "Over", "Carry out one instruction, passing over a call - a guess "

@@ -18,8 +18,8 @@ def test_nothing_but_assembling_before_a_program_is_opened():
 
 
 def test_what_can_be_done_while_the_machine_stands_still():
-    assert possible(STANDING) == {"assemble", "continue", "step", "over", "finish",
-                                  "restart"}
+    assert possible(STANDING) == {"assemble", "continue", "until", "step", "over",
+                                  "finish", "restart"}
 
 
 def test_only_stopping_while_the_machine_is_going():
@@ -48,9 +48,11 @@ def test_a_step_back_needs_something_in_the_journal():
 
 
 def test_every_action_has_a_key_of_its_own():
-    keys = [action.keys for action in ACTIONS]
+    """Of the run and of the files alike: they are pressed in the same window, and
+    one key cannot mean two things in it."""
+    keys = [action.keys for action in ACTIONS + FILES]
     assert len(set(keys)) == len(keys)
-    assert all(action.keys for action in ACTIONS)
+    assert all(action.keys for action in ACTIONS + FILES)
 
 
 def test_the_actions_rars_has_keep_the_keys_rars_gives_them():
@@ -68,6 +70,7 @@ def test_the_actions_rars_has_keep_the_keys_rars_gives_them():
 def test_the_actions_rars_has_not_got_took_the_free_keys_beside_them():
     assert BY_NAME["over"].keys == "F6"
     assert BY_NAME["finish"].keys == "<Shift>F6"
+    assert BY_NAME["until"].keys == "F4"
 
 
 def test_every_action_says_what_it_is_for():

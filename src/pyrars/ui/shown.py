@@ -58,6 +58,21 @@ def project_called(where: str, files: int) -> str:
     return f"a project of {files} files" if files > 1 else ""
 
 
+# How fast a run may be made to go: instructions a second, and nothing at all for
+# as fast as the machine can. RARS offers every number from one to thirty on a
+# slider and then unlimited; the stops here are the ones somebody would stop at,
+# and thirty is the last of them because that is how often a snapshot goes out
+# (`session.control.EVERY`) and a speed above it could not be seen to differ.
+SPEEDS = (None, 30.0, 10.0, 5.0, 2.0, 1.0)
+
+
+def speed_text(speed: float | None) -> str:
+    """What a speed is called where it is chosen."""
+    if speed is None:
+        return "As fast as it can"
+    return f"{speed:g} a second"
+
+
 ERROR = "error"
 WARNING = "warning"
 

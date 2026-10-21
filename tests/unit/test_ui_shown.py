@@ -54,6 +54,23 @@ def diagnostic(kind: str, file: str | None, line: int, message: str) -> Diagnost
     return Diagnostic(kind, SourceLoc(file, line, 1) if file else None, message)
 
 
+def test_the_speeds_a_run_may_be_held_to():
+    from pyrars.session.control import EVERY
+    from pyrars.ui.shown import SPEEDS, speed_text
+
+    assert SPEEDS[0] is None  # as fast as it can, which is where everything begins
+    assert speed_text(None) == "As fast as it can"
+    assert speed_text(30.0) == "30 a second"  # and not "30.0 a second"
+    assert speed_text(1.0) == "1 a second"
+    assert len(set(SPEEDS)) == len(SPEEDS)
+    chosen = [speed for speed in SPEEDS if speed is not None]
+    assert chosen == sorted(chosen, reverse=True)  # the fastest first, as a list reads
+    # A speed above the rate at which snapshots go out could not be told from any
+    # other such speed: nothing on the screen would differ.
+    assert max(chosen) <= 1 / EVERY
+    assert min(chosen) > 0  # a run that carries out nothing is a run that is stopped
+
+
 def test_what_was_said_is_sorted_by_the_file_it_was_said_about():
     by_file, loose = problems([
         diagnostic("Error", "main.s", 3, "nothing of the kind"),

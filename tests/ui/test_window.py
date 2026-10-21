@@ -96,8 +96,8 @@ def shown(view) -> str:
 def test_a_window_is_built(window):
     assert window.get_title() == "main.s - pyRARS"  # the file it was opened on
     assert window.get_content() is not None
-    # the nine of the run, and the two of the files that have a button of their own
-    assert len(window.buttons) == 11
+    # the ten of the run, and the two of the files that have a button of their own
+    assert len(window.buttons) == 12
 
 
 def test_the_program_is_open_in_the_editor_before_anything_is_assembled(window):
@@ -618,6 +618,116 @@ def test_the_views_are_left_alone_while_the_machine_runs(gtk, tmp_path, turning)
         assert turning(lambda: len(made.views_of["labels"].rows) == asked)
         assert len(made.views_of["registers"].rows) == registers
         assert made.views_of["text"].rows != []
+    finally:
+        made.close_up()
+
+
+# --------------------------------------------- on to the line being looked at
+
+
+def test_a_run_on_to_the_line_the_cursor_is_on(window, turning):
+    """The one movement that comes from the editor: the line being LOOKED at is
+    where the run stops, which is what every debugger calls running to the
+    cursor."""
+    window.do("assemble")
+    assert turning(lambda: window.state == "standing")
+    page = window.editor.page
+    page.buffer.place_cursor(page.buffer.get_iter_at_line(9)[1])  # `la t2, total`
+    window.do("until")
+    # it stopped BEFORE that line, with the loop behind it and nothing after it
+    assert turning(lambda: window.editor.page.marked("here") == [10])
+    assert turning(lambda: _row(window, "registers", "t1")[2] == "0x00000006")
+    assert _row(window, "registers", "t2")[2] == "0x00000000"
+    assert window.state == "standing"
+
+
+def test_a_line_with_no_instruction_on_it_cannot_be_run_to(window, turning):
+    """Said in the same words as a breakpoint on such a line: it is the same
+    question asked twice."""
+    window.do("assemble")
+    assert turning(lambda: window.state == "standing")
+    page = window.editor.page
+    page.buffer.place_cursor(page.buffer.get_iter_at_line(1)[1])  # `.data`
+    window.do("until")
+    assert turning(lambda: "no instruction" in shown(window.messages))
+    assert window.state == "standing"  # and nothing of the run moved
+    assert "until failed" in shown(window.messages)
+
+
+def test_a_file_that_is_nowhere_has_no_line_to_run_to(gtk, tmp_path, turning):
+    """The machine was given a file and not a buffer, so a buffer that is on no
+    disk names no line of the program."""
+    from pyrars.ui.window import Window
+
+    made = Window(cache=str(tmp_path / "cache"))
+    try:
+        made.editor.add()
+        made.state = "standing"  # as if a program were open: the action is allowed
+        made.do("until")
+        assert turning(lambda: "not saved anywhere yet" in shown(made.messages))
+    finally:
+        made.close_up()
+
+
+# --------------------------------------------------- how fast the run goes
+
+
+def test_the_speed_chosen_reaches_the_run(window):
+    """And with it the questions the controller is to answer while the run goes
+    on: a window cannot ask for anything of its own while a movement is being
+    carried out."""
+    from pyrars.ui import shown as writing
+    from pyrars.ui.window import PLACES, REGISTERS
+
+    window.how_fast.set_selected(len(writing.SPEEDS) - 1)  # the slowest there is
+    assert window.speed == min(speed for speed in writing.SPEEDS if speed)
+    assert window.control.speed == window.speed
+    assert set(window.control.watching) == {REGISTERS, PLACES}
+    window.how_fast.set_selected(0)  # as fast as it can again
+    assert window.speed is None and window.control.speed is None
+    assert window.control.watching == {}
+
+
+def test_the_views_keep_up_while_a_slowed_run_goes(gtk, tmp_path, turning):
+    """A slowed run is one somebody is WATCHING, which is the whole reason to slow
+    one: the thread of the run sleeps between instructions, so there is time to
+    show everything, and the views are put up as they are when the machine stands
+    still. The opposite case - a run at the speed of the machine - is the test
+    above this one.
+    """
+    from pyrars.ui import shown as writing
+    from pyrars.ui.window import Window
+
+    (tmp_path / "main.s").write_text(
+        ".globl main\n.text\nmain: li t0, 0\nloop: addi t0, t0, 1\n      j loop\n")
+    (tmp_path / "notes.s").write_text("# no part of the program\n")
+    made = Window(files=(str(tmp_path / "main.s"),), cache=str(tmp_path / "cache"))
+    try:
+        made.do("assemble")
+        assert turning(lambda: made.state == "standing")
+        made.open(str(tmp_path / "notes.s"))  # and this is what is being looked at
+        made.how_fast.set_selected(writing.SPEEDS.index(10.0))
+        made.do("continue")
+        assert turning(lambda: made.state == "running")
+        for name in ("labels", "registers", "text"):
+            made.views_of[name].show([])
+        assert turning(lambda: all(made.views_of[name].rows
+                                   for name in ("labels", "registers", "text")))
+        # and what they show follows the machine: the counter keeps rising
+        counted = _row(made, "registers", "t0")[2]
+        assert turning(lambda: _row(made, "registers", "t0")[2] != counted)
+        # but the editor is not dragged to the line thirty times a second: a
+        # window that jumped about while a run went on could not be read, and the
+        # file somebody is looking at is not always the file being run
+        assert made.editor.page.path.endswith("notes.s")
+        # and nothing is ASKED while the run goes on: a question would wait in the
+        # queue behind a movement nobody has stopped, and pile up there as fast as
+        # the snapshots arrive. What is shown comes with the snapshots instead.
+        assert made.control.queued == 0
+        made.do("pause")
+        # and once it stands still it does follow, as it always has
+        assert turning(lambda: made.editor.page.path.endswith("main.s"))
+        assert made.state == "standing"
     finally:
         made.close_up()
 

@@ -23,6 +23,16 @@ A movement is a method of its own, because it takes time and ends in a `Stopped`
 Everything else a session can do - the breakpoints, the watchpoints, every view,
 `set` and `poke` - is a QUESTION, asked with `ask` and a function over the session,
 so that this module does not have to grow a method for every method of a session.
+
+A run may be SLOWED: `speed` is how many instructions a second it is allowed to
+carry out, or nothing at all for as fast as it can (RARS has the same, as a slider
+from one a second to unlimited). It is read every turn of the loop, so it may be
+changed while the run goes on, and it is the one thing besides the flags above
+that another thread may write. While something is being watched - the registers,
+the memory - every snapshot of a movement carries the answers to those questions
+with it: a run nobody could follow needs no registers thirty times a second, and a
+run somebody is following needs all of them, and only the thread of the run may go
+and get them.
 """
 
 import queue
@@ -178,7 +188,8 @@ class Waiting:
 class RunController:
     """One thread, one machine, one way in and one way out."""
 
-    def __init__(self, tell, out=None, errors=None, every: float = EVERY) -> None:
+    def __init__(self, tell, out=None, errors=None, every: float = EVERY,
+                 speed: float | None = None) -> None:
         self.tell = tell  # called IN THE THREAD OF THE RUN with every event
         # The input of the program is always `Waiting`: a window has no standard
         # input to read, and the answer comes from whoever owns its main loop. What
@@ -188,6 +199,15 @@ class RunController:
                                answered=self._given_a_line)
         self.io = ConsoleIO(out=out, errors=errors, reader=self.waiting)
         self.every = every
+        # How many instructions a second the machine is to carry out, or nothing at
+        # all for as fast as it can. A machine that runs at a million instructions
+        # a second cannot be watched; one that runs at five can.
+        self.speed = speed
+        # Questions answered with every snapshot of a movement, by name, so that
+        # whoever is watching a slowed run sees the machine change and not only
+        # where it stands. They are answered IN THE THREAD OF THE RUN like any
+        # other question, and one that cannot be answered is not asked again.
+        self.watching: dict = {}
         self.session: Session | None = None
         self.program: AssembledProgram | None = None
         self.state = NOTHING
@@ -199,6 +219,7 @@ class RunController:
         self.closed = False
         self._stopping = False  # whether the run was told to end where it is
         self._said = 0.0  # when the last snapshot went out
+        self._due = 0.0  # when the next instruction of a slowed run is due
         self._thread = threading.Thread(target=self._working, name="pyrars-run",
                                         daemon=True)
         self._thread.start()
@@ -225,8 +246,13 @@ class RunController:
     def carry_on(self) -> None:
         self._movement("continue", lambda session: session.carry_on())
 
-    def until(self, address: int) -> None:
-        self._movement("until", lambda session: session.until(address))
+    def until(self, where: int | str) -> None:
+        """On to a place and no further. The place may be an address or anything a
+        session can name one by - a label, `file:line` - and the naming is done in
+        the thread of the run, because only there is there a program to name it in.
+        """
+        self._movement("until", lambda session: session.until(
+            where if isinstance(where, int) else session.address_of(where)))
 
     def restart(self) -> None:
         self.waiting.forget()
@@ -279,6 +305,13 @@ class RunController:
         self.waiting.ended()
 
     # -------------------------------------------------------------- the thread
+
+    @property
+    def queued(self) -> int:
+        """How much is waiting to be done. Nothing should pile up here while a
+        movement goes on: the thread is inside the movement, so whatever is asked
+        of it waits, and a run without an end makes everything wait for ever."""
+        return self._work.qsize()
 
     def settled(self, timeout: float = 5.0) -> bool:
         """Wait until everything asked for has been done; False if it is still
@@ -336,6 +369,7 @@ class RunController:
         session = self._open()
         self.state = RUNNING
         self._said = 0.0  # the first turn of a movement says where it is at once
+        self._due = 0.0  # and nothing is owed yet: a movement begins unheld
         try:
             stopped = moving(session)
         finally:
@@ -373,17 +407,57 @@ class RunController:
         return Answer(LOAD, program)
 
     def _turn(self, turn) -> None:
-        """Every turn of the loop, in the thread of the run: a snapshot goes out
-        when enough time has passed since the last one, and no oftener."""
+        """Every turn of the loop, in the thread of the run: the run is held back to
+        the speed it was given, and a snapshot goes out when enough time has passed
+        since the last one, and no oftener."""
+        if self.speed:
+            self._held_back()
         now = time.monotonic()
         if now - self._said < self.every:
             return
         self._said = now
         self.tell(self._shot())
+        self._watched()
         # And give way. The loop of the machine is Python, so it holds the
         # interpreter until it is taken from it; whoever is being told these
         # snapshots has to be able to answer a pointer while they arrive.
         time.sleep(0)
+
+    def _watched(self) -> None:
+        """Whatever is being watched, with this snapshot."""
+        for what, question in tuple(self.watching.items()):
+            try:
+                self.tell(Answer(what, question(self.session)))
+            except Exception as problem:
+                # Thirty of the same complaint a second says nothing a window can
+                # use; one, and the question is let go.
+                self.watching.pop(what, None)
+                self.tell(Failed(what, str(problem) or problem.__class__.__name__))
+
+    def _held_back(self) -> None:
+        """Hold the run back before it carries out the next instruction.
+
+        A speed is a CEILING: so many instructions a second and no more. The
+        waiting is counted from when the last instruction was DUE rather than from
+        now, so that what the turn itself took is part of what it was given and not
+        something added to it; but a run that has fallen behind - a slow
+        instruction, a line waited for, a speed just raised - begins counting again
+        from now rather than owing the difference for ever and then racing to repay
+        it, which is the opposite of what a slow run is for.
+
+        The first turn of a movement waits for nothing - its `_due` of zero is a
+        time long past, which is the same thing as having fallen behind. This is
+        called AFTER an instruction, so by then that instruction has been carried
+        out: a step at one a second is a step and not a second of nothing, and a
+        run of N instructions takes the N - 1 intervals that lie between them.
+        """
+        now = time.monotonic()
+        wait = 1.0 / self.speed
+        if self._due > now:
+            time.sleep(self._due - now)
+            self._due += wait
+        else:
+            self._due = now + wait
 
     def _shot(self, stopped: Stopped | None = None) -> Snapshot:
         """Where the run is now."""
