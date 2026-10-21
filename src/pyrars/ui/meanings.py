@@ -12,6 +12,11 @@ pseudo-instruction and every directive the assembler takes has a line here, and
 that nothing here is a word nobody has. An instruction added without a word about
 what it does will not pass.
 
+What can be settled about a RUN is here too, for the same reason: what each model
+and each device is FOR, and what each option of it does. What the options are is
+read off the models themselves (`session/settings.py`); nothing of either is
+written down twice.
+
 The floating point instructions are made rather than written out: the family is
 exactly regular - the same operation in single and in double precision, and a
 conversion between every pair of formats - so writing all sixty of them by hand
@@ -20,8 +25,10 @@ would be sixty chances to make a mistake in one of them.
 
 from pyrars.asm import pseudo
 from pyrars.asm.directives import DIRECTIVES
+from pyrars.devices import DEVICES
 from pyrars.isa.instructions import instructions
 from pyrars.isa.registers import CSRS, X_NAMES
+from pyrars.session.settings import options_of
 
 WIDE = ("but on the low 32 bits only, with the sign of the result spread "
         "through the whole of rd")
@@ -375,6 +382,110 @@ OF_CONTROL: dict[str, str] = {
 }
 
 
+# What can be settled about a RUN: what each model and each device IS, and what
+# each option of it does. `session/settings.py` says what the options ARE - it
+# reads them off the models themselves - and this says what they MEAN; a test holds
+# the two together, so an option added to a model is owed a line here the same day.
+OF_SETTINGS: dict[str, str] = {
+    "statistics": "Whether the run is counted: the instructions by kind, the "
+                  "traps, and how many branches went and how many did not",
+    "cache": "A model of a cache between the machine and the memory. It changes "
+             "nothing a program sees: it counts what would have been a hit and "
+             "what a miss, and shows what the cache would be holding",
+    "cache.block_bytes": "How many bytes one block holds, which is how much of "
+                         "memory comes in on a miss",
+    "cache.sets": "How many sets of blocks the cache is divided into; the address "
+                  "of a word says which set it belongs in",
+    "cache.ways": "How many blocks one set holds: one way is a direct cache, and "
+                  "one set of many ways is a fully associative one",
+    "cache.replacement": "Which block of a full set makes room: the one longest "
+                         "unused, the one longest in, or one by chance",
+    "cache.write_back": "Whether a block written to waits in the cache and goes to "
+                        "memory when it is thrown out, instead of going at once",
+    "cache.write_allocate": "Whether a write that misses brings its block into the "
+                            "cache first, instead of going straight to memory",
+    "fetches": "Whether the addresses of the INSTRUCTIONS reach that one cache as "
+               "well as the data - which is what a machine with one cache for "
+               "everything does. RARS never shows its cache a fetch",
+    "instructions": "A cache of its own for the instructions, beside the one of "
+                    "the data, which is what a machine with two of them has",
+    "pipeline": "A model of the time a run would have taken on a machine of five "
+                "stages. It changes nothing a program sees: it counts the cycles, "
+                "what was waited for and what was guessed wrongly",
+    "pipeline.forwarding": "Whether a result may be used by the instruction behind "
+                           "it before it has been written back, instead of waiting",
+    "pipeline.one_port": "Whether fetching an instruction and reaching into memory "
+                         "share one way to it, so that one of the two must wait",
+    "pipeline.penalty": "How many cycles are thrown away when a branch was guessed "
+                        "wrongly",
+    "pipeline.trap_penalty": "How many cycles are thrown away by an instruction "
+                             "that could not be carried out",
+    "pipeline.diagram": "How many instructions to keep the diagram of - the cycle "
+                        "each of the five stages began in. None keeps none",
+    "guesser": "How the machine of the model guesses which way a branch goes "
+               "before it can know",
+    "guesser.predictor": "Never expect a branch to be taken, always expect it, or "
+                         "keep a table of what each branch did last time",
+    "guesser.entries": "How many entries that table holds; a branch falls into one "
+                       "of them by its address",
+    "guesser.bits": "How many bits one counter of the table holds: one bit "
+                    "remembers the last time, two need two surprises to change "
+                    "their mind",
+    "guesser.taken": "Whether every counter of the table begins by expecting a "
+                     "branch to be taken",
+    "keyboard": "The keyboard and display of RARS: four registers of MMIO through "
+                "which a program reads the keys typed and shows characters one at "
+                "a time",
+    "keyboard.delay": "How many instructions the display takes over one character "
+                      "before it will take another",
+    "keyboard.technique": "How that delay is counted: exactly, evenly by chance up "
+                          "to it, or around it by chance",
+    "keyboard.rows": "How many rows of characters the display holds",
+    "keyboard.columns": "How many characters a row of the display holds",
+    "keyboard.show_after_delay": "Whether a character appears when its delay is "
+                                 "over, as in RARS, rather than the moment it is "
+                                 "written",
+    "keyboard.queue": "How many keys typed the keyboard holds at once. One is what "
+                      "RARS keeps, and a key is lost if the program did not read "
+                      "the one before it",
+    "lab": "The digital lab of RARS: two seven-segment displays, a keyboard of "
+           "sixteen keys that stay down, and a counter that asks for attention "
+           "again and again",
+    "timer": "A clock a program can read, and a time at which it asks to be told",
+    "timer.mode": "Whether the clock follows the wall or counts in instructions "
+                  "carried out - which makes a run repeatable",
+    "timer.step": "How many milliseconds one instruction is worth, where the clock "
+                  "counts in instructions",
+    "bitmap": "A piece of memory seen as a picture: one word is one unit of it, "
+              "and the low 24 bits of that word are its red, green and blue",
+    "bitmap.place": "Where in memory the picture lies: the base of the data "
+                    "segment, the global pointer, the data of the program, the "
+                    "heap, or the area of the devices",
+    "bitmap.width": "How wide the whole picture is, in pixels",
+    "bitmap.height": "How tall the whole picture is, in pixels",
+    "bitmap.unit_width": "How wide one unit of the picture is, in pixels; the "
+                         "picture holds as many units across as it has room for",
+    "bitmap.unit_height": "How tall one unit of the picture is, in pixels",
+    "disk": "Storage a program talks to a block at a time: it says which block, "
+            "where in memory and how many, and then waits for the work or asks to "
+            "be told when it ends",
+    "disk.blocks": "How many blocks the disk holds",
+    "disk.block_size": "How many bytes one block of it holds",
+    "disk.delay": "How many instructions carrying one block over takes",
+    "dma": "A controller that copies memory while the program runs on, and says "
+           "when it has finished",
+    "dma.speed": "How many words it copies for every instruction the machine "
+                 "carries out",
+    "halt": "A register a program writes to to say that it is finished and how it "
+            "went, without asking anything of the environment",
+}
+
+
+def of_a_setting(name: str) -> str:
+    """What one thing of a run means, by its own name or `thing.option`."""
+    return OF_SETTINGS.get(name, "")
+
+
 def of_an_instruction(mnemonic: str) -> str:
     return OF_INSTRUCTIONS.get(mnemonic, "")
 
@@ -419,4 +530,22 @@ def missing() -> dict[str, tuple[str, ...]]:
             f"f{number}" for number in range(32) if not of_a_float(number)),
         "control registers": tuple(sorted(one for one in CSRS
                                           if not of_a_control(one))),
+        "settings of a run": _settings_without_a_word(),
     }
+
+
+def _settings_without_a_word() -> tuple[str, ...]:
+    """What can be settled about a run and has no word about it here.
+
+    What CAN be settled is `session/settings.py`, which reads it off the models
+    and the devices themselves - so a model that gains an option, or a device
+    added to the registry, is owed a line here at once.
+    """
+    owed = [name for name in ("statistics", "fetches", "instructions")
+            if not of_a_setting(name)]
+    for what in ("cache", "pipeline", "guesser", *DEVICES):
+        if not of_a_setting(what):
+            owed.append(what)
+        owed += [f"{what}.{one.name}" for one in options_of(what)
+                 if not of_a_setting(f"{what}.{one.name}")]
+    return tuple(owed)

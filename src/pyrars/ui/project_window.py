@@ -110,7 +110,20 @@ class ProjectWindow(Adw.Window):
             model=Gtk.StringList.new(list(CONFIGS)))
         self.config.set_selected(
             list(CONFIGS).index(project.mem_config if project else "Default"))
+        self.config.connect("notify::selected", self._configuration_chosen)
         group.add(self.config)
+
+        # What the name of a configuration MEANS. Three names on a chooser say
+        # nothing about where a program will find itself; the addresses do, and
+        # they are the names the assembler and the simulator use in their own
+        # messages about an address.
+        self.where_things_are = Adw.ExpanderRow(
+            title="Where everything is",
+            subtitle="The addresses this configuration puts the parts of the "
+                     "memory at")
+        self.said_of_the_memory: list[Adw.ActionRow] = []
+        group.add(self.where_things_are)
+        self._configuration_chosen()
 
         self.pseudo = Adw.SwitchRow(
             title="Pseudo-instructions",
@@ -137,6 +150,21 @@ class ProjectWindow(Adw.Window):
 
     def _files_chosen(self) -> None:
         self.says.set_text("")
+
+    def _configuration_chosen(self, *gone) -> None:
+        """The addresses of the configuration now chosen, under the chooser."""
+        for row in self.said_of_the_memory:
+            self.where_things_are.remove(row)
+        self.said_of_the_memory = []
+        config = CONFIGS[list(CONFIGS)[self.config.get_selected()]]
+        for name, address in shown.memory(config):
+            row = Adw.ActionRow(title=name.replace("_", " "))
+            said = Gtk.Label(label=address)
+            said.add_css_class("monospace")
+            said.add_css_class("dim-label")
+            row.add_suffix(said)
+            self.where_things_are.add_row(row)
+            self.said_of_the_memory.append(row)
 
     def project_now(self) -> Project | None:
         """What is ticked, as a project; nothing where it cannot be one."""

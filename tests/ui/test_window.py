@@ -732,6 +732,107 @@ def test_the_views_keep_up_while_a_slowed_run_goes(gtk, tmp_path, turning):
         made.close_up()
 
 
+# ------------------------- the things around the machine, and the models of it
+
+
+def test_the_views_of_the_models_say_why_they_are_empty(window, turning):
+    """A table with nothing in it answers two questions at once, and the one being
+    asked here is "where would I ask for this?" - so it says where."""
+    window.do("assemble")
+    assert turning(lambda: window.state == "standing")
+    for name in ("devices", "cache", "pipeline", "counted"):
+        assert window.views_of[name].rows == [] or name == "counted"
+    for name in ("devices", "cache", "pipeline"):
+        assert "The run window" in window.views_of[name].saying, name
+    # the counting is the one thing a run comes with, so it is there at once
+    assert turning(lambda: window.views_of["counted"].rows != [])
+
+
+def test_the_models_and_the_devices_of_a_run(gtk, tmp_path, turning):
+    """What was asked for in the run window is what the machine is given, and
+    every view of it fills from the session and from nowhere else."""
+    from pyrars.session import settings as runs
+    from pyrars.ui.window import Window
+
+    (tmp_path / "main.s").write_text(SUM)
+    made = Window(files=(str(tmp_path / "main.s"),), cache=str(tmp_path / "cache"),
+                  settings=runs.Settings(cache={"sets": 4}, pipeline={},
+                                         guesser={"predictor": "table"},
+                                         devices={"timer": {"mode": "virtual"}}))
+    try:
+        made.do("assemble")
+        assert turning(lambda: made.state == "standing")
+        made.do("continue")
+        assert turning(lambda: made.state == "ended")
+        assert turning(lambda: made.views_of["cache"].rows != [])
+
+        # the cache was built as it was asked for, and it saw the run
+        said = {row[1]: row[2] for row in made.views_of["cache"].rows}
+        assert said["sets"] == "4"
+        assert said["the instructions reach it"] == "no"  # nobody asked for that
+        # the program touches memory once - the one word it keeps - and the first
+        # touch of a block is always a miss
+        assert said["accesses"] == "1" and said["misses"] == "1"
+        assert said["hits"] == "0" and said["hit rate"] == "0.0000"
+        assert made.views_of["blocks"].rows != []
+
+        # the pipeline counted the time, and the guesser under it
+        counted = {row[0]: row[1] for row in made.views_of["pipeline"].rows}
+        assert int(counted["cycles"]) > int(counted["instructions"]) == WHOLE
+        assert counted["guesser"].startswith("a table of 16 entries")
+        assert made.views_of["diagram"].rows != []
+
+        # the device is attached, at the address a program finds it at
+        assert [row[0] for row in made.views_of["devices"].rows] == ["timer"]
+        assert made.views_of["devices"].rows[0][1] == "0xffff0018"
+        assert "clock" in [row[1] for row in made.views_of["state"].rows]
+        assert "virtual" in made.views_of["state"].rows[0][2]
+
+        # and what the run was made of
+        made_of = {row[0]: row[1] for row in made.views_of["counted"].rows}
+        assert made_of["instructions"] == str(WHOLE)
+        assert int(made_of["branches that went"]) == 2  # the loop turns three times
+    finally:
+        made.close_up()
+
+
+def test_a_run_that_cannot_be_set_up_is_said_and_nothing_is_assembled(gtk, tmp_path,
+                                                                      turning):
+    """The settings are given to the machine at the Assemble, so this is where
+    something impossible in them comes out."""
+    from pyrars.session import settings as runs
+    from pyrars.ui.window import Window
+
+    (tmp_path / "main.s").write_text(SUM)
+    made = Window(files=(str(tmp_path / "main.s"),), cache=str(tmp_path / "cache"),
+                  settings=runs.Settings(cache={"sets": 3}))
+    try:
+        made.do("assemble")
+        assert turning(lambda: "cannot be set up" in shown(made.messages))
+        assert "power of two" in shown(made.messages)
+        assert made.state == "nothing"  # nothing was assembled
+    finally:
+        made.close_up()
+
+
+def test_settings_of_a_run_that_cannot_be_read_are_said_and_not_thrown(gtk, tmp_path,
+                                                                      turning):
+    """A window must open whatever is in that file: a person who wrote one by hand
+    is told what is wrong with it and given the settings as they come."""
+    from pyrars.session import settings as runs
+    from pyrars.ui.window import Window
+
+    Path(runs.path()).parent.mkdir(parents=True)
+    Path(runs.path()).write_text('{"cache": "a big one"}')
+    made = Window(cache=str(tmp_path / "cache"))
+    try:
+        assert "the settings of the run:" in shown(made.messages)
+        assert "as they come" in shown(made.messages)
+        assert made.settings == runs.Settings()
+    finally:
+        made.close_up()
+
+
 def _row(window, which: str, name: str):
     for row in window.views_of[which].rows:
         if row[0] == name:

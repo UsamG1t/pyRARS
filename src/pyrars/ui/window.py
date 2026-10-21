@@ -20,11 +20,13 @@ from pyrars.session.control import (  # noqa: E402
     ASKING, ENDED, LOAD, NOTHING, RUNNING, STANDING, WAITING, Answer, Failed,
     RunController, Snapshot)
 from pyrars.session import project as projects  # noqa: E402
+from pyrars.session import settings as runs  # noqa: E402
 from pyrars.session.project import Project  # noqa: E402
 from pyrars.ui import actions, shown  # noqa: E402
 from pyrars.ui.editor import Editor  # noqa: E402
 from pyrars.ui.help_window import HelpWindow  # noqa: E402
 from pyrars.ui.project_window import ProjectWindow  # noqa: E402
+from pyrars.ui.settings_window import SettingsWindow  # noqa: E402
 from pyrars.ui.table import Table  # noqa: E402
 from pyrars.values import VALUE_FORMATS  # noqa: E402
 
@@ -58,9 +60,21 @@ class Window(Adw.ApplicationWindow):
     __gtype_name__ = "PyrarsWindow"
 
     def __init__(self, project: Project | None = None, files: tuple[str, ...] = (),
-                 cache: str | None = None, where: str = "", **kept) -> None:
+                 cache: str | None = None, where: str = "",
+                 settings: runs.Settings | None = None, **kept) -> None:
         super().__init__(title="pyRARS", **kept)
         self.project = project
+        # How the program is RUN, as against what it IS: the devices, the models,
+        # the counting. They belong to the person rather than to the program, so
+        # they are read from where a desktop keeps such things; one that cannot be
+        # understood is SAID and the defaults are used, for a window must open
+        # whatever is in that file.
+        self.settings, self.settings_wrong = settings, ""
+        if settings is None:
+            try:
+                self.settings = runs.read()
+            except ValueError as problem:
+                self.settings, self.settings_wrong = runs.Settings(), str(problem)
         self.state = NOTHING
         self.journal = 0
         self.buttons: dict[str, Gtk.Button] = {}
@@ -93,6 +107,15 @@ class Window(Adw.ApplicationWindow):
                             "The run is inside no call.\n"
                             "A frame appears for every call it is inside, as far as "
                             "the calling convention lets anyone tell."),
+            "devices": Table(shown.DEVICES, _NOT_ASKED_FOR % "No device is attached"),
+            "state": Table(shown.STATE, "A device says what it holds while it is "
+                                        "attached and a program is open"),
+            "cache": Table(shown.CACHES, _NOT_ASKED_FOR % "No cache is modelled"),
+            "blocks": Table(shown.BLOCKS, "The caches are holding nothing yet"),
+            "pipeline": Table(shown.PIPELINE,
+                              _NOT_ASKED_FOR % "No pipeline is modelled"),
+            "diagram": Table(shown.DIAGRAM, "The pipeline is keeping no diagram"),
+            "counted": Table(shown.COUNTED, _NOT_ASKED_FOR % "The run is not counted"),
         }
         self.console = _telling()
         self.messages = _telling()
@@ -104,6 +127,9 @@ class Window(Adw.ApplicationWindow):
         # the main loop, and the events go the same way through `_told`.
         self.control = RunController(self._told, out=Writing(self._printed),
                                      errors=Writing(self._printed))
+        if self.settings_wrong:
+            self._said(f"the settings of the run: {self.settings_wrong}")
+            self._said("running with the settings as they come")
         self._possible()
 
     # ---------------------------------------------------------------- the shape
@@ -187,6 +213,7 @@ class Window(Adw.ApplicationWindow):
         for name in ("new", "open", "save", "save_as", "close_tab"):
             files.append(actions.BY_NAME[name].label, f"app.{name}")
         files.append(actions.BY_NAME["project"].label, "app.project")
+        files.append(actions.BY_NAME["settings"].label, "app.settings")
         helping = Gio.Menu()
         helping.append(actions.BY_NAME["reference"].label, "app.reference")
         changes = Gio.Menu()
@@ -231,9 +258,21 @@ class Window(Adw.ApplicationWindow):
 
     def _views(self) -> Gtk.Widget:
         self.views = Gtk.Notebook()
+        self.views.set_scrollable(True)  # there are more pages than there is room
         for name, title in (("text", "Text"), ("data", "Data"),
                             ("labels", "Labels"), ("frames", "Frames")):
             self.views.append_page(self.views_of[name], Gtk.Label(label=title))
+        # The things around the machine and the models that watch it. Each is two
+        # views of one thing - what it IS above, what it has DONE below - because
+        # a hit rate without the cache that gave it says nothing.
+        for names, title in ((("devices", "state"), "Devices"),
+                             (("cache", "blocks"), "Cache"),
+                             (("pipeline", "diagram"), "Pipeline")):
+            self.views.append_page(
+                _one_above_the_other(self.views_of[names[0]],
+                                     self.views_of[names[1]]),
+                Gtk.Label(label=title))
+        self.views.append_page(self.views_of["counted"], Gtk.Label(label="Counted"))
         self.console_page = self.views.append_page(self._console(),
                                                    Gtk.Label(label="Console"))
         self.views.append_page(_scrolled(self.messages), Gtk.Label(label="Messages"))
@@ -311,6 +350,14 @@ class Window(Adw.ApplicationWindow):
         changed is written there first.
         """
         self.editor.save_every_change()
+        try:
+            # The devices and the models the run is to be watched by, built afresh
+            # for every run: a model counts, and what the last run counted is not
+            # what this one is counting.
+            world = runs.world(self.settings)
+        except ValueError as problem:
+            self._said(f"the run cannot be set up: {problem}")
+            return
         if self.project is not None:
             missing = [path for path in self.project.paths
                        if not Path(path).exists()]
@@ -321,7 +368,7 @@ class Window(Adw.ApplicationWindow):
             self._said("assembling the project "
                        f"{shown.name_of(self.where_the_project_is)}"
                        if self.where_the_project_is else "assembling the project")
-            self.control.load(self.project)
+            self.control.load(self.project, **world)
             return
         page = self.editor.page
         if page is None or not page.path:
@@ -329,7 +376,7 @@ class Window(Adw.ApplicationWindow):
             return
         self._said(f"assembling {shown.name_of(page.path)}")
         self.control.load(projects.of([page.path],
-                                      folder=str(Path(page.path).parent)))
+                                      folder=str(Path(page.path).parent)), **world)
 
     def _on_to_the_cursor(self) -> None:
         """Carry on to the line being looked at, and no further.
@@ -362,6 +409,28 @@ class Window(Adw.ApplicationWindow):
                                settled=self.the_program_is, transient_for=self)
         asking.present()
         return asking
+
+    def ask_how_it_is_run(self) -> SettingsWindow:
+        """The window that says how the program is run."""
+        asking = SettingsWindow(self.settings, settled=self.the_run_is,
+                                transient_for=self)
+        asking.present()
+        return asking
+
+    def the_run_is(self, settings: runs.Settings) -> None:
+        """What the window of the run answered with. It is kept at once - these
+        belong to the person, and a person who set them up does not expect to set
+        them up again tomorrow - and given to the machine at the next Assemble."""
+        self.settings = settings
+        kept = ""
+        try:
+            kept = f", kept in {shown.name_of(runs.save(settings))}"
+        except OSError as problem:
+            self._said(f"the settings of the run could not be kept: "
+                       f"{problem.strerror or problem}")
+        self._said(f"the run: {shown.run_called(settings)}{kept}")
+        if self.session_is_open:
+            self._said("assemble again to run it that way")
 
     def the_program_is(self, project: Project | None, where: str) -> None:
         """What the project window answered with: a project, or nothing at all -
@@ -455,6 +524,9 @@ class Window(Adw.ApplicationWindow):
                 return GLib.SOURCE_REMOVE
             elif event.what == PLACES:
                 self._places_shown(event.value)
+                return GLib.SOURCE_REMOVE
+            elif event.what == MODELS:
+                self._models_shown(event.value)
                 return GLib.SOURCE_REMOVE
             self._said(f"{event.what}: {_short(event.value)}")
         elif isinstance(event, Failed):
@@ -554,6 +626,7 @@ class Window(Adw.ApplicationWindow):
                 # A run that waits for a line is in no state to answer questions
                 # either: the thread is standing in the input.
                 self.control.ask(PLACES, _of_the_places)
+                self.control.ask(MODELS, _of_the_models)
         self._text_again()
 
     def _registers_shown(self, values: dict) -> None:
@@ -561,6 +634,19 @@ class Window(Adw.ApplicationWindow):
             shown.registers(values["registers"], self.format))
         self.views_of["floats"].show(shown.floats(values["floats"], self.format))
         self.views_of["control"].show(shown.control(values["control"], self.format))
+
+    def _models_shown(self, values: dict) -> None:
+        """What is attached to the machine, and what the models counted."""
+        self.views_of["devices"].show(shown.devices(values["devices"],
+                                                    values["base"]))
+        self.views_of["state"].show(shown.device_state(values["devices"],
+                                                       self.format))
+        self.views_of["cache"].show(shown.caches(values["caches"]))
+        self.views_of["blocks"].show(shown.cache_blocks(values["blocks"]))
+        self.views_of["pipeline"].show(shown.pipeline(values["pipeline"],
+                                                      values["guesser"]))
+        self.views_of["diagram"].show(shown.diagram(values["diagram"]))
+        self.views_of["counted"].show(shown.counted(values["counted"]))
 
     def _places_shown(self, values: dict) -> None:
         self.views_of["data"].show(shown.data(values["data"], self.format))
@@ -586,6 +672,7 @@ class Window(Adw.ApplicationWindow):
         if self.session_is_open:
             self.control.ask(REGISTERS, _of_the_registers)
             self.control.ask(PLACES, _of_the_places)
+            self.control.ask(MODELS, _of_the_models)
 
     @property
     def session_is_open(self) -> bool:
@@ -632,6 +719,12 @@ class Window(Adw.ApplicationWindow):
 BREAKS = "breaks"
 REGISTERS = "the registers"
 PLACES = "the places"
+MODELS = "the models"
+
+# What a view says when the thing it shows was never asked for. The run window is
+# where it IS asked for, and a person looking at an empty table wants to know that
+# much (the lesson of the empty frames, 2026-10-21).
+_NOT_ASKED_FOR = '%s.\nThe run window ("The run…") is where one is asked for'
 
 
 def _of_the_registers(session) -> dict:
@@ -644,6 +737,15 @@ def _of_the_registers(session) -> dict:
 def _of_the_places(session) -> dict:
     return {"data": session.data(), "labels": session.symbols(),
             "frames": session.frames()}
+
+
+def _of_the_models(session) -> dict:
+    """Everything around the machine, in one asking: the devices and the three
+    models, which are shown together and are each a question of their own."""
+    return {"devices": session.devices(), "base": session.options.config.mmio_base,
+            "caches": session.caches(), "blocks": session.cache_lines(),
+            "pipeline": session.pipeline(), "guesser": session.guesser(),
+            "diagram": session.diagram(), "counted": session.statistics()}
 
 # What the line under the console says when nothing is in it.
 _TYPE_HERE = "A line for the program"
@@ -660,6 +762,7 @@ _OF_A_FILE = {
     "find": lambda window: window.editor.find(),
     "toggle_break": lambda window: window.editor.toggle_breakpoint_here(),
     "project": lambda window: window.ask_what_the_program_is(),
+    "settings": lambda window: window.ask_how_it_is_run(),
     "reference": lambda window: window.open_the_reference(),
     "undo": lambda window: window.editor.undo(),
     "redo": lambda window: window.editor.redo(),
@@ -697,6 +800,17 @@ def _scrolled(child: Gtk.Widget) -> Gtk.Widget:
     window = Gtk.ScrolledWindow(hexpand=True, vexpand=True)
     window.set_child(child)
     return window
+
+
+def _one_above_the_other(upper: Gtk.Widget, lower: Gtk.Widget) -> Gtk.Widget:
+    """Two views of one thing, the lower one movable: what the thing IS above and
+    what it has DONE below."""
+    pane = Gtk.Paned(orientation=Gtk.Orientation.VERTICAL)
+    pane.set_start_child(upper)
+    pane.set_end_child(lower)
+    pane.set_position(220)
+    pane.set_resize_start_child(True)
+    return pane
 
 
 def _in_a_frame(child: Gtk.Widget, title: str) -> Gtk.Widget:

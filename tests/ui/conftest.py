@@ -23,6 +23,17 @@ def gtk():
     return GLib.MainContext.default()
 
 
+@pytest.fixture(autouse=True)
+def nobody_elses_settings(tmp_path, monkeypatch):
+    """The settings of a RUN belong to the person, and a test is not the person.
+
+    A window reads them from where a desktop keeps such things, so every test of
+    one is given a folder of its own: otherwise the suite would read whatever the
+    person running it had set, and write over it.
+    """
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
+
+
 @pytest.fixture
 def turning(gtk):
     """Turn the main loop until something is true, or say that it never was.

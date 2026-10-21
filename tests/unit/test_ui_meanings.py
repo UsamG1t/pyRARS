@@ -22,7 +22,41 @@ def test_everything_the_assembler_takes_says_what_it_does():
     """The day somebody adds an instruction, this is what says it owes a line."""
     assert missing() == {"instructions": (), "pseudo-instructions": (),
                          "directives": (), "registers": (),
-                         "floating point registers": (), "control registers": ()}
+                         "floating point registers": (), "control registers": (),
+                         "settings of a run": ()}
+
+
+def test_everything_that_can_be_settled_about_a_run_says_what_it_means():
+    """The settings are held to the models the same way: what CAN be set is read
+    off the models and the devices themselves, so an option added to one is owed a
+    line here that day."""
+    from pyrars.devices import DEVICES
+    from pyrars.session.settings import options_of
+    from pyrars.ui.meanings import OF_SETTINGS, of_a_setting
+
+    for what in ("cache", "pipeline", "guesser", *DEVICES):
+        assert of_a_setting(what), what
+        for one in options_of(what):
+            assert of_a_setting(f"{what}.{one.name}"), f"{what}.{one.name}"
+    for name in ("statistics", "fetches", "instructions"):
+        assert of_a_setting(name), name
+    # and nothing here is a setting nobody has
+    for name in OF_SETTINGS:
+        what, _, option = name.partition(".")
+        assert what in ("statistics", "fetches", "instructions", "cache",
+                        "pipeline", "guesser", *DEVICES), name
+        if option:
+            assert option in [one.name for one in options_of(what)], name
+
+
+def test_what_is_said_of_a_setting_is_a_line_like_any_other():
+    from pyrars.ui.meanings import OF_SETTINGS
+
+    for name, said in OF_SETTINGS.items():
+        assert said[0].isupper() or said.startswith("A "), (name, said)
+        assert not said.endswith("."), name
+        assert "\n" not in said, name
+        assert len(said) < 230, (name, len(said))
 
 
 def test_nothing_here_is_a_word_nobody_has():

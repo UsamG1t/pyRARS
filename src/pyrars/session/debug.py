@@ -21,7 +21,7 @@ A change made by `set` or `poke` is not a step of the machine, so a step back do
 not undo it; the answer of the command says so (the rule of the journal, stage 21).
 """
 
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field, fields, replace
 
 from pyrars.analysis.cache import Caches
 from pyrars.analysis.callstack import CallStack, Frame
@@ -234,6 +234,86 @@ class GuesserEntry:
     taken: bool
     right: int
     wrong: int
+
+
+@dataclass(frozen=True, slots=True)
+class Setting:
+    """One thing a model was built with, or one thing it counted, by name.
+
+    A model is built from a dataclass of its own and counts whatever it counts;
+    what every front end does with it is the same - puts the name beside the value
+    - so the session hands it over in that shape and neither of them has to know
+    the fields of a model by heart.
+    """
+
+    name: str
+    value: object
+
+
+@dataclass(frozen=True, slots=True)
+class CacheSeen:
+    """One cache of a run: how it was built, and how it has fared."""
+
+    side: str  # "cache" where there is one for everything, else "data"/"instructions"
+    fetches: bool  # whether the addresses of the instructions reach this one
+    settings: tuple[Setting, ...]
+    accesses: int
+    hits: int
+    misses: int
+    rate: float
+    writebacks: int
+    through: int
+
+
+@dataclass(frozen=True, slots=True)
+class PipelineSeen:
+    """The time a run would have taken, as the model of it counted."""
+
+    settings: tuple[Setting, ...]
+    cycles: int
+    instructions: int
+    cpi: float
+    lost: int  # cycles nothing was carried out in
+    stalls: tuple[Setting, ...]  # by what caused them
+    branches: int
+    wrong: int  # branches guessed wrongly
+
+
+@dataclass(frozen=True, slots=True)
+class StageSeen:
+    """Where one instruction was in which cycle, as a diagram shows it."""
+
+    address: int
+    mnemonic: str
+    starts: tuple[int, ...]  # the cycle each of the five stages began in
+    ex_cycles: int
+    waited: int
+
+
+@dataclass(frozen=True, slots=True)
+class GuesserSeen:
+    """How the machine of the model guessed where the branches went."""
+
+    name: str
+    settings: tuple[Setting, ...]  # the entries and the bits, where it has them
+    guesses: int
+    right: int
+    wrong: int
+    accuracy: float
+
+
+@dataclass(frozen=True, slots=True)
+class StatisticsSeen:
+    """What a run was made of."""
+
+    turns: int
+    instructions: int
+    traps: int
+    unknown: int
+    taken: int  # branches that went
+    not_taken: int
+    kinds: tuple[Setting, ...]  # by the kind of instruction, the unmet left out
+    categories: tuple[Setting, ...]  # and by the five RARS counts by
 
 
 @dataclass(frozen=True, slots=True)
@@ -713,6 +793,59 @@ class Session:
                                            low + bytes_of - 1, line.dirty))
         return found
 
+    def caches(self) -> list[CacheSeen]:
+        """The caches of the run, as they were built and as they have fared."""
+        caches = self.models.caches
+        if caches is None:
+            return []
+        return [CacheSeen(side, self.models.fetches if side != "data" else False,
+                          _settings(cache.settings), cache.accesses, cache.hits,
+                          cache.misses, cache.hit_rate, cache.writebacks,
+                          cache.through)
+                for side, cache in caches.each().items()]
+
+    def pipeline(self) -> PipelineSeen | None:
+        """What the model of the time counted, where a run was watched by one."""
+        model = self.models.pipeline
+        if model is None:
+            return None
+        return PipelineSeen(_settings(model.settings), model.cycles,
+                            model.instructions, model.cpi, model.lost,
+                            tuple(Setting(cause, many)
+                                  for cause, many in sorted(model.stalls.items())),
+                            model.branches, model.mispredictions)
+
+    def diagram(self) -> list[StageSeen]:
+        """The diagram the model kept, as far back as it was told to keep it."""
+        model = self.models.pipeline
+        if model is None:
+            return []
+        return [StageSeen(row.pc, row.mnemonic, tuple(row.starts), row.ex_cycles,
+                          row.waited) for row in model.diagram]
+
+    def guesser(self) -> GuesserSeen | None:
+        model = self.models.pipeline
+        if model is None:
+            return None
+        guesser = model.predictor
+        return GuesserSeen(guesser.name,
+                           tuple(Setting(name, getattr(guesser, name))
+                                 for name in ("entries", "bits")
+                                 if hasattr(guesser, name)),
+                           guesser.guesses, guesser.right, guesser.wrong,
+                           guesser.accuracy)
+
+    def statistics(self) -> StatisticsSeen | None:
+        """What the run was made of, where a run was counted at all."""
+        counted = self.models.statistics
+        if counted is None:
+            return None
+        return StatisticsSeen(
+            counted.turns, counted.instructions, counted.traps, counted.unknown,
+            counted.taken, counted.not_taken,
+            tuple(Setting(name, many) for name, many in counted.kinds().items()),
+            tuple(Setting(name, many) for name, many in counted.categories().items()))
+
     def guesser_entries(self) -> list[GuesserEntry]:
         """The entries of a table of history, where the pipeline guesses with one."""
         guesser = self.models.pipeline.predictor if self.models.pipeline else None
@@ -783,6 +916,12 @@ class Session:
         if quiet:
             return None
         raise ValueError(f'"{name}": no floating point register of that name')
+
+
+def _settings(settings) -> tuple[Setting, ...]:
+    """What a model was built with, in the order its own dataclass declares it."""
+    return tuple(Setting(one.name, getattr(settings, one.name))
+                 for one in fields(settings))
 
 
 def _fields(name: str, value: int) -> str:

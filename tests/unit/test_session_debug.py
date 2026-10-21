@@ -633,6 +633,108 @@ def test_a_guesser_without_a_table_shows_none(tmp_path):
     assert s.guesser_entries() == []
 
 
+def test_what_a_cache_was_built_with_and_what_it_counted(tmp_path):
+    """Both in one answer, because a hit rate means nothing without the cache that
+    gave it: the comparison anybody is making is the same program through a cache
+    of two ways and through one of eight."""
+    s = session(SUM, tmp_path, caches=Caches(CacheSettings(sets=4, ways=2)))
+    s.carry_on()
+    seen = s.caches()
+    assert [one.side for one in seen] == ["cache"]  # one cache for everything
+    built = {one.name: one.value for one in seen[0].settings}
+    assert (built["sets"], built["ways"]) == (4, 2)
+    assert "seed" in built  # everything it was built with, not only what is offered
+    assert seen[0].accesses == seen[0].hits + seen[0].misses > 0
+    assert seen[0].rate == seen[0].hits / seen[0].accesses
+    assert seen[0].fetches is False  # nobody asked for the instructions to reach it
+
+
+def test_a_cache_of_the_instructions_says_that_they_reach_it(tmp_path):
+    s = session(SUM, tmp_path, fetches=True,
+                caches=Caches(CacheSettings(), instructions=CacheSettings()))
+    s.carry_on()
+    seen = {one.side: one for one in s.caches()}
+    assert set(seen) == {"data", "instructions"}
+    assert seen["instructions"].fetches is True
+    assert seen["data"].fetches is False
+    # one fetch per instruction carried out; the ecall that ended the run is the
+    # one turn that never reached a model
+    assert seen["instructions"].accesses == WHOLE
+    assert seen["instructions"].hits > seen["instructions"].misses  # a loop
+
+
+def test_what_the_pipeline_counted(tmp_path):
+    s = session(SUM, tmp_path, pipeline=Pipeline(PipelineSettings()))
+    s.carry_on()
+    seen = s.pipeline()
+    assert seen.instructions == WHOLE
+    assert seen.cycles > seen.instructions  # five stages, and what was waited for
+    assert seen.cpi == seen.cycles / seen.instructions
+    assert seen.lost == sum(one.value for one in seen.stalls)  # what it waited for
+    assert {one.name for one in seen.settings} >= {"forwarding", "penalty"}
+    assert all(isinstance(one.value, int) for one in seen.stalls)
+    # four branches, and not every one of them was guessed wrongly: a machine
+    # that never expects a branch to be taken is right the once it is not
+    assert seen.branches == 4 and 0 < seen.wrong < seen.branches
+
+
+def test_the_diagram_the_pipeline_kept(tmp_path):
+    s = session(SUM, tmp_path, pipeline=Pipeline(PipelineSettings()))
+    s.carry_on()
+    drawn = s.diagram()
+    assert len(drawn) == WHOLE
+    assert drawn[0].address == TEXT and drawn[0].starts == (0, 1, 2, 3, 4)
+    assert len(drawn[0].starts) == 5  # the five stages
+    assert all(one.ex_cycles >= 1 for one in drawn)
+    # every instruction begins to be fetched after the one before it
+    assert all(later.starts[0] > earlier.starts[0]
+               for earlier, later in zip(drawn, drawn[1:]))
+
+
+def test_what_the_guesser_counted(tmp_path):
+    s = session(SUM, tmp_path,
+                pipeline=Pipeline(PipelineSettings(), Table(entries=4, bits=2)))
+    s.carry_on()
+    seen = s.guesser()
+    assert "4 entries" in seen.name and "2 bits" in seen.name
+    assert {one.name: one.value for one in seen.settings} == {"entries": 4,
+                                                             "bits": 2}
+    assert seen.guesses == seen.right + seen.wrong == 4  # the one branch, four times
+    assert seen.accuracy == seen.right / seen.guesses
+
+
+def test_a_guesser_that_keeps_no_table_says_what_it_is_all_the_same(tmp_path):
+    s = session(SUM, tmp_path, pipeline=Pipeline(PipelineSettings()))
+    s.carry_on()
+    assert s.guesser().settings == ()  # it has nothing to be built with
+    assert s.guesser().name
+
+
+def test_what_the_run_was_made_of(tmp_path):
+    s = session(SUM, tmp_path, statistics=True)
+    s.carry_on()
+    seen = s.statistics()
+    assert seen.instructions == WHOLE and seen.turns == WHOLE
+    assert (seen.traps, seen.unknown) == (0, 0)
+    assert (seen.taken, seen.not_taken) == (3, 1)
+    kinds = {one.name: one.value for one in seen.kinds}
+    assert kinds["branch"] == 4 and kinds["store"] == 1
+    assert sum(one.value for one in seen.kinds) == WHOLE
+    assert "jal" not in kinds  # by the KIND of instruction, not by its name
+    assert [one.name for one in seen.categories] == ["ALU", "Jump", "Branch",
+                                                     "Memory", "Other"]
+
+
+def test_a_run_nobody_asked_to_watch_says_so_and_does_not_fall_over(sum_session):
+    """A window shows what it is given; what it is NOT given it says nothing
+    about, and must not be made to guess."""
+    assert sum_session.caches() == []
+    assert sum_session.pipeline() is None
+    assert sum_session.diagram() == []
+    assert sum_session.guesser() is None
+    assert sum_session.statistics() is None
+
+
 def test_the_models_a_session_was_asked_for(tmp_path):
     s = session(SUM, tmp_path, statistics=True)
     s.carry_on()

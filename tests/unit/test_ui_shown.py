@@ -71,6 +71,143 @@ def test_the_speeds_a_run_may_be_held_to():
     assert min(chosen) > 0  # a run that carries out nothing is a run that is stopped
 
 
+# ----------------------- the things around the machine, and the models of it
+
+
+def _setting(name, value):
+    from pyrars.session.debug import Setting
+
+    return Setting(name, value)
+
+
+def test_what_is_attached_and_where_a_program_finds_it():
+    from pyrars.session.debug import DeviceSeen
+    from pyrars.ui.meanings import of_a_setting
+    from pyrars.ui.shown import devices
+
+    seen = [DeviceSeen("timer", 0x18, 16, {}),
+            DeviceSeen("bitmap", None, None, {})]
+    rows = devices(seen, 0xFFFF0000)
+    assert rows[0] == ("timer", "0xffff0018", "16 bytes", of_a_setting("timer"))
+    # a device that answers no address has nowhere to be, and says so rather than
+    # showing a number anybody would read as an address
+    assert rows[1][1:3] == ("no address of its own", "")
+
+
+def test_what_a_device_holds_in_the_words_of_the_device():
+    from pyrars.session.debug import DeviceSeen
+    from pyrars.ui.shown import device_state
+
+    seen = [DeviceSeen("timer", 0x18, 16, {"clock": "virtual (1 ms)", "time": 256,
+                                           "armed": False}),
+            DeviceSeen("halt", 0x28, 4, {})]
+    rows = device_state(seen)
+    assert rows[0] == ("timer", "clock", "virtual (1 ms)")
+    assert rows[1] == ("timer", "time", "0x00000100")  # a number, in the format
+    assert rows[2] == ("timer", "armed", "no")  # and never "False"
+    assert device_state(seen, "dec")[1] == ("timer", "time", "256")
+    assert rows[3] == ("halt", "", "says nothing of itself")
+
+
+def test_how_a_cache_was_built_and_how_it_has_fared():
+    from pyrars.session.debug import CacheSeen
+    from pyrars.ui.shown import caches
+
+    seen = [CacheSeen("cache", True, (_setting("sets", 4), _setting("ways", 2)),
+                      accesses=10, hits=7, misses=3, rate=0.7, writebacks=1,
+                      through=0)]
+    rows = caches(seen)
+    assert rows[0] == ("cache", "sets", "4")  # a count is a count, never 0x4
+    assert ("cache", "the instructions reach it", "yes") in rows
+    assert ("cache", "accesses", "10") in rows
+    assert ("cache", "hit rate", "0.7000") in rows
+    assert ("cache", "written through", "0") in rows
+
+
+def test_the_blocks_the_caches_are_holding():
+    from pyrars.session.debug import CacheLine
+    from pyrars.ui.shown import cache_blocks
+
+    lines = [CacheLine("data", 2, 0, 5, 0x10010000, 0x1001000F, True),
+             CacheLine("data", 2, 1, 6, 0x10010010, 0x1001001F, False)]
+    assert cache_blocks(lines) == (
+        ("data", "2", "0", "0x10010000 - 0x1001000f", "written to"),
+        ("data", "2", "1", "0x10010010 - 0x1001001f", ""))
+
+
+def test_what_the_pipeline_counted_with_the_guesser_under_it():
+    from pyrars.session.debug import GuesserSeen, PipelineSeen
+    from pyrars.ui.shown import pipeline
+
+    seen = PipelineSeen((_setting("forwarding", True),), cycles=48,
+                        instructions=31, cpi=48 / 31, lost=10,
+                        stalls=(_setting("branch", 6), _setting("load", 4)),
+                        branches=4, wrong=3)
+    guesser = GuesserSeen("a table of 4 entries", (_setting("entries", 4),),
+                          guesses=4, right=1, wrong=3, accuracy=0.25)
+    rows = dict(pipeline(seen, guesser))
+    assert rows["forwarding"] == "yes"
+    assert rows["cycles"] == "48" and rows["cycles an instruction"] == "1.5484"
+    assert rows["lost to branch"] == "6" and rows["cycles lost"] == "10"
+    assert rows["guesser"] == "a table of 4 entries"
+    assert rows["guesser entries"] == "4"
+    assert rows["how often rightly"] == "0.2500"
+    assert pipeline(None) == ()  # nobody asked for one
+
+
+def test_the_diagram_of_the_pipeline():
+    from pyrars.session.debug import StageSeen
+    from pyrars.ui.shown import DIAGRAM, diagram
+
+    rows = diagram([StageSeen(0x400000, "addi", (0, 1, 2, 3, 4), 1, 0),
+                    StageSeen(0x400004, "lw", (1, 2, 3, 4, 6), 1, 1)])
+    assert rows[0] == ("0x00400000", "addi", "0", "1", "2", "3", "4", "")
+    assert rows[1][-1] == "1"  # what it waited for, where it waited at all
+    assert all(len(row) == len(DIAGRAM) for row in rows)
+
+
+def test_what_the_run_was_made_of():
+    from pyrars.session.debug import StatisticsSeen
+    from pyrars.ui.shown import counted
+
+    seen = StatisticsSeen(turns=31, instructions=31, traps=0, unknown=0, taken=3,
+                          not_taken=1, kinds=(_setting("branch", 4),),
+                          categories=(_setting("ALU", 20),))
+    rows = dict(counted(seen))
+    assert rows["instructions"] == "31" and rows["branches that went"] == "3"
+    assert rows["of kind branch"] == "4"
+    assert rows["alu instructions"] == "20"
+    assert counted(None) == ()
+
+
+def test_where_a_memory_configuration_puts_everything():
+    from pyrars.isa.memory import CONFIGS
+    from pyrars.ui.shown import memory
+
+    rows = dict(memory(CONFIGS["Default"]))
+    assert rows["text_base"] == "0x00400000"
+    assert rows["stack_pointer"] == "0x7fffeffc"
+    assert rows["mmio_base"] == "0xffff0000"
+    assert "name" not in rows  # the name of a configuration is no address of one
+    assert len(rows) == 16
+
+
+def test_what_a_run_is_set_up_as_in_one_line():
+    from pyrars.session.settings import Settings
+    from pyrars.ui.shown import run_called
+
+    assert run_called(Settings()) == "counted"
+    assert run_called(Settings(statistics=False)) \
+        == "nothing modelled and nothing attached"
+    assert run_called(Settings(cache={}, fetches=True)) \
+        == "counted; a cache of the data and of the instructions"
+    assert run_called(Settings(cache={}, instructions={})) \
+        == "counted; a cache of the data; a cache of the instructions of its own"
+    assert run_called(Settings(statistics=False, pipeline={},
+                               devices={"timer": {}, "halt": {}})) \
+        == "a pipeline; halt, timer"
+
+
 def test_what_was_said_is_sorted_by_the_file_it_was_said_about():
     by_file, loose = problems([
         diagnostic("Error", "main.s", 3, "nothing of the kind"),

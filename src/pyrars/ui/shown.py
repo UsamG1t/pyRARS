@@ -6,7 +6,7 @@ tested and mutated like every other module of the project. The widgets ask it an
 put the answer up.
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, fields
 from pathlib import Path
 
 UNTITLED = "Untitled"
@@ -111,6 +111,7 @@ def said(problems_of_a_line) -> str:
 
 # ------------------------------------------------------- the views of the machine
 
+from pyrars.ui import meanings  # noqa: E402 - what a device or a model is FOR
 from pyrars.values import value_text  # noqa: E402 - the shapes a value is written in
 
 HERE = "▶"  # the row the machine stands on
@@ -211,3 +212,164 @@ def _place(place) -> str:
     """A place of the program, as a row of a table shows it."""
     name = f" <{place.symbol}>" if place.symbol else ""
     return f"0x{place.address:08x}{name}"
+
+
+# ------------------------------------- the things around the machine, and the models
+
+DEVICES = ("Device", "Where", "Size", "What it is")
+STATE = ("Device", "Name", "Value")
+CACHES = ("Cache", "Name", "Value")
+BLOCKS = ("Cache", "Set", "Place", "Addresses", "")
+PIPELINE = ("Name", "Value")
+DIAGRAM = ("Address", "Instruction", "IF", "ID", "EX", "MEM", "WB", "Waited")
+COUNTED = ("Name", "Value")
+MEMORY = ("Name", "Address")
+
+
+def devices(seen, base: int = 0) -> tuple[tuple[str, ...], ...]:
+    """What is attached to the machine, and where a program finds it.
+
+    A device that answers no address - the bitmap display watches memory instead -
+    has nowhere to be, and says so rather than showing a number that would be
+    read as an address.
+    """
+    return tuple((one.name,
+                  "no address of its own" if one.offset is None
+                  else f"0x{base + one.offset:08x}",
+                  "" if one.size is None else f"{one.size} bytes",
+                  meanings.of_a_setting(one.name)) for one in seen)
+
+
+def device_state(seen, form: str = "hex") -> tuple[tuple[str, ...], ...]:
+    """What each attached device holds, as the device itself says it.
+
+    A device answers in words of its own making - "virtual (1 ms an instruction)",
+    "0x10010000, 512 by 256 units" - and those are written as they come; a number
+    is written in the format chosen for everything else, and a yes or no as a yes
+    or no, because a device that says `True` says nothing about a bit.
+    """
+    rows = []
+    for one in seen:
+        for name, value in one.state.items():
+            rows.append((one.name, name, _as_it_is(value, form)))
+        if not one.state:
+            rows.append((one.name, "", "says nothing of itself"))
+    return tuple(rows)
+
+
+def _as_it_is(value, form: str = "hex") -> str:
+    """One thing a device or a model holds, written as what it is."""
+    if isinstance(value, bool):
+        return "yes" if value else "no"
+    if isinstance(value, int):
+        return value_text(value, 32, form)
+    if isinstance(value, float):
+        return f"{value:.4f}"
+    return str(value)
+
+
+def caches(seen, form: str = "hex") -> tuple[tuple[str, ...], ...]:
+    """Every cache of the run: how it was built, and how it has fared.
+
+    The two are in one table under the name of the cache, because a hit rate means
+    nothing without the cache that gave it: a run of the same program through a
+    cache of two ways and of eight is the comparison anybody is making.
+    """
+    rows = []
+    for cache in seen:
+        rows += [(cache.side, one.name, _as_it_is(one.value, "dec"))
+                 for one in cache.settings]
+        rows.append((cache.side, "the instructions reach it",
+                     "yes" if cache.fetches else "no"))
+        rows += [(cache.side, name, _as_it_is(value, "dec")) for name, value in
+                 (("accesses", cache.accesses), ("hits", cache.hits),
+                  ("misses", cache.misses), ("hit rate", cache.rate),
+                  ("written back", cache.writebacks),
+                  ("written through", cache.through))]
+    return tuple(rows)
+
+
+def cache_blocks(lines, form: str = "hex") -> tuple[tuple[str, ...], ...]:
+    """The blocks the caches are holding. The place of a block in its set is also
+    its age, where a cache replaces by use or by order of arrival: the one at place
+    0 is the one that makes room (the entry of `CacheLine`)."""
+    return tuple((line.side, str(line.set), str(line.place),
+                  f"0x{line.low:08x} - 0x{line.high:08x}",
+                  "written to" if line.dirty else "") for line in lines)
+
+
+def pipeline(seen, guesser=None) -> tuple[tuple[str, ...], ...]:
+    """What the model of the time counted, with the guesser under it.
+
+    The guesser is part of the same answer because what it got wrong is where the
+    lost cycles came from: a run with a table of history beside the same run
+    without one is the whole point of having either.
+    """
+    if seen is None:
+        return ()
+    rows = [(one.name, _as_it_is(one.value, "dec")) for one in seen.settings]
+    rows += [("cycles", str(seen.cycles)), ("instructions", str(seen.instructions)),
+             ("cycles an instruction", f"{seen.cpi:.4f}"),
+             ("cycles lost", str(seen.lost))]
+    rows += [(f"lost to {one.name}", str(one.value)) for one in seen.stalls]
+    rows += [("branches", str(seen.branches)), ("guessed wrongly", str(seen.wrong))]
+    if guesser is not None:
+        rows.append(("guesser", guesser.name))
+        rows += [(f"guesser {one.name}", _as_it_is(one.value, "dec"))
+                 for one in guesser.settings]
+        rows += [("guesses", str(guesser.guesses)),
+                 ("guessed rightly", str(guesser.right)),
+                 ("how often rightly", f"{guesser.accuracy:.4f}")]
+    return tuple(rows)
+
+
+def diagram(rows) -> tuple[tuple[str, ...], ...]:
+    """The diagram: the cycle each of the five stages of each instruction began in,
+    and how long the instruction waited before it could go on."""
+    return tuple((f"0x{row.address:08x}", row.mnemonic,
+                  *(str(cycle) for cycle in row.starts),
+                  str(row.waited) if row.waited else "") for row in rows)
+
+
+def counted(seen) -> tuple[tuple[str, ...], ...]:
+    """What the run was made of: the instructions by kind, and the five kinds RARS
+    counts by beside them."""
+    if seen is None:
+        return ()
+    rows = [("instructions", str(seen.instructions)), ("turns", str(seen.turns)),
+            ("traps", str(seen.traps)), ("words that encode nothing",
+                                         str(seen.unknown)),
+            ("branches that went", str(seen.taken)),
+            ("branches that did not", str(seen.not_taken))]
+    rows += [(f"of kind {one.name}", str(one.value)) for one in seen.kinds]
+    rows += [(f"{one.name.lower()} instructions", str(one.value))
+             for one in seen.categories]
+    return tuple(rows)
+
+
+def run_called(settings) -> str:
+    """What a run is set up as, in one line: what is modelled and what is
+    attached. Everything else about a run is the program's own doing."""
+    said = []
+    if settings.statistics:
+        said.append("counted")
+    if settings.cache is not None:
+        said.append("a cache of the data"
+                    + (" and of the instructions" if settings.fetches else ""))
+    if settings.instructions is not None:
+        said.append("a cache of the instructions of its own")
+    if settings.pipeline is not None:
+        said.append("a pipeline")
+    if settings.devices:
+        said.append(", ".join(sorted(settings.devices)))
+    return "; ".join(said) or "nothing modelled and nothing attached"
+
+
+def memory(config) -> tuple[tuple[str, ...], ...]:
+    """A memory configuration: where every part of the memory begins and ends.
+
+    The names are the ones the assembler and the simulator use for them, so that
+    what is read here is what is meant in a message about an address.
+    """
+    return tuple((one.name, f"0x{getattr(config, one.name):08x}")
+                 for one in fields(config) if one.name != "name")

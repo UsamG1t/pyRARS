@@ -91,13 +91,15 @@ def test_the_guesses_say_that_they_are_guesses():
 
 
 def test_nothing_but_opening_with_no_file_open():
-    # what the program IS and what may be written in one can always be asked
-    assert possible_of_a_file() == {"new", "open", "project", "reference"}
+    # what the program IS, how it is RUN and what may be written in one can always
+    # be asked: none of the three is about the file being looked at
+    assert possible_of_a_file() == {"new", "open", "project", "settings",
+                                    "reference"}
 
 
 def test_what_can_be_done_to_a_file_that_is_open():
-    assert possible_of_a_file(1) == {"new", "open", "project", "reference",
-                                     "save_as", "close_tab", "find",
+    assert possible_of_a_file(1) == {"new", "open", "project", "settings",
+                                     "reference", "save_as", "close_tab", "find",
                                      "toggle_break"}
 
 

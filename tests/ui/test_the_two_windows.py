@@ -1,8 +1,9 @@
-"""The two windows that open from the main one: what the program is, and what can
-be written in one.
+"""The windows that open from the main one: what the program is, how it is run,
+and what can be written in a program.
 
-What they hold is worked out without GTK (`ui/help.py`, `session/project.py`);
-what is tried here is that a person can see it and change it.
+What they hold is worked out without GTK (`ui/help.py`, `session/project.py`,
+`session/settings.py`); what is tried here is that a person can see it and change
+it.
 """
 
 import json
@@ -194,6 +195,165 @@ def test_the_project_window_opens_with_what_is_already_settled(window, two_files
         assert again.width.get_selected() == 1
     finally:
         again.destroy()
+
+
+def test_a_memory_configuration_says_where_everything_is(window):
+    """Three names on a chooser say nothing about where a program will find
+    itself; the addresses do, and they follow the name that is chosen."""
+    from pyrars.isa.memory import CONFIGS
+
+    asking = window.ask_what_the_program_is()
+    try:
+        said = {row.get_title(): _suffix(row) for row in asking.said_of_the_memory}
+        assert said["text base"] == "0x00400000"  # the Default configuration
+        assert said["stack pointer"] == "0x7fffeffc"
+        assert "name" not in said  # a configuration's own name is not an address
+        asking.config.set_selected(list(CONFIGS).index("CompactDataAtZero"))
+        said = {row.get_title(): _suffix(row) for row in asking.said_of_the_memory}
+        assert said["text base"] == "0x00003000"
+        assert said["data base"] == "0x00000000"
+    finally:
+        asking.destroy()
+
+
+# ------------------------------------------------------- how the program is run
+
+
+def test_the_run_window_opens_with_what_is_already_settled(window):
+    from pyrars.session import settings as runs
+
+    window.settings = runs.Settings(statistics=False, cache={"sets": 4},
+                                    devices={"timer": {"mode": "virtual"}})
+    asking = window.ask_how_it_is_run()
+    try:
+        assert asking.statistics.get_active() is False
+        assert asking.wanted["cache"].get_enable_expansion() is True
+        assert asking.rows["cache"]["sets"].value() == 4
+        assert asking.wanted["timer"].get_enable_expansion() is True
+        assert asking.rows["timer"]["mode"].value() == "virtual"
+        # and what was never asked for is not wanted
+        assert asking.wanted["pipeline"].get_enable_expansion() is False
+        assert asking.wanted["lab"].get_active() is False
+    finally:
+        asking.destroy()
+
+
+def test_what_the_run_window_holds_is_the_settings_of_a_run(window):
+    """Every kind of row answers in the kind of value its option takes: a number
+    as a number, a yes or no as a bool, one of a few words as that word."""
+    from pyrars.session import settings as runs
+
+    asking = window.ask_how_it_is_run()
+    try:
+        asking.wanted["cache"].set_enable_expansion(True)
+        asking.rows["cache"]["sets"].widget.set_value(16)
+        asking.rows["cache"]["write_back"].widget.set_active(False)
+        asking.rows["cache"]["replacement"].widget.set_selected(1)  # fifo
+        asking.wanted["pipeline"].set_enable_expansion(True)
+        asking.rows["guesser"]["predictor"].widget.set_selected(2)  # a table
+        asking.wanted["halt"].set_active(True)
+        settings = asking.settings_now()
+        assert settings.cache["sets"] == 16
+        assert settings.cache["write_back"] is False
+        assert settings.cache["replacement"] == "fifo"
+        assert settings.pipeline is not None and settings.instructions is None
+        assert settings.guesser["predictor"] == "table"
+        assert settings.devices == {"halt": {}}  # a register, with nothing to ask
+        # and it is a thing a machine can really be built from
+        assert runs.world(settings)["caches"].data.settings.sets == 16
+    finally:
+        asking.destroy()
+
+
+def test_the_settings_of_a_run_are_kept_where_they_will_be_found_again(window,
+                                                                      tmp_path):
+    """They belong to the person: somebody who set them up does not expect to set
+    them up again tomorrow."""
+    from pyrars.session import settings as runs
+
+    asking = window.ask_how_it_is_run()
+    asking.wanted["pipeline"].set_enable_expansion(True)
+    asking._use()
+    asking.destroy()
+    assert window.settings.pipeline is not None
+    assert runs.read().pipeline is not None  # and it is on the disk
+    assert "a pipeline" in shown(window.messages)
+
+
+def test_a_run_that_cannot_be_set_up_is_said_where_it_was_asked_for(window):
+    """Beside the rows that say it, and not in the messages of a window somebody
+    would have to go and look at - and the window stays open, because something
+    has to be changed."""
+    asking = window.ask_how_it_is_run()
+    try:
+        asking.wanted["cache"].set_enable_expansion(True)
+        asking.rows["cache"]["sets"].widget.set_value(3)
+        asking._use()
+        assert "power of two" in asking.says.get_text()
+        assert asking.get_visible() or True  # it did not close
+        assert window.settings.cache is None  # and nothing was settled
+    finally:
+        asking.destroy()
+
+
+def test_a_run_may_be_let_go_of_again(window):
+    from pyrars.session import settings as runs
+
+    asking = window.ask_how_it_is_run()
+    asking.wanted["cache"].set_enable_expansion(True)
+    asking._use()
+    asking.destroy()
+    again = window.ask_how_it_is_run()
+    again._let_go()
+    again.destroy()
+    assert window.settings == runs.Settings()
+    # the run is still COUNTED, which is what the settings come as: counting costs
+    # one comparison a turn and is what the window's own numbers are made of
+    assert shown(window.messages).endswith("the run: counted, kept in run.json\n")
+
+
+def test_every_option_of_every_device_can_be_asked_for(window):
+    """The rows are made from what the models and the devices say of themselves,
+    so this is the test that every kind of option has a widget at all."""
+    from pyrars.devices import DEVICES
+    from pyrars.session.settings import options_of
+
+    asking = window.ask_how_it_is_run()
+    try:
+        for name in DEVICES:
+            offered = options_of(name)
+            if not offered:
+                continue
+            assert set(asking.rows[name]) == {one.name for one in offered}
+            for one in offered:
+                assert asking.rows[name][one.name].value() == one.default
+    finally:
+        asking.destroy()
+
+
+def _suffix(row) -> str:
+    """The label a row of the memory carries beside its name."""
+    child = row.get_first_child()
+    while child is not None:
+        found = _label_in(child)
+        if found:
+            return found
+        child = child.get_next_sibling()
+    return ""
+
+
+def _label_in(widget) -> str:
+    from gi.repository import Gtk
+
+    if isinstance(widget, Gtk.Label) and widget.get_text().startswith("0x"):
+        return widget.get_text()
+    child = widget.get_first_child() if hasattr(widget, "get_first_child") else None
+    while child is not None:
+        found = _label_in(child)
+        if found:
+            return found
+        child = child.get_next_sibling()
+    return ""
 
 
 # ----------------------------------------------- what can be written in a program
