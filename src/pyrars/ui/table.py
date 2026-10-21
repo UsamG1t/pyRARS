@@ -24,12 +24,18 @@ class Row(GObject.Object):
         self.cells = cells
 
 
-class Table(Gtk.ScrolledWindow):
-    """A column for every title, a row for every row it is shown."""
+class Table(Gtk.Stack):
+    """A column for every title, a row for every row it is shown.
+
+    A table with nothing in it says WHY it has nothing in it. An empty table
+    answers two questions at once - is there nothing, or is this broken? - and
+    only one of them is the one being asked.
+    """
 
     __gtype_name__ = "PyrarsTable"
 
-    def __init__(self, titles: tuple[str, ...], monospace: bool = True) -> None:
+    def __init__(self, titles: tuple[str, ...], otherwise: str = "",
+                 monospace: bool = True) -> None:
         super().__init__(hexpand=True, vexpand=True)
         self.titles = titles
         self.store = Gio.ListStore.new(Row)
@@ -39,7 +45,13 @@ class Table(Gtk.ScrolledWindow):
         view.add_css_class("data-table")
         for index, title in enumerate(titles):
             view.append_column(self._column(title, index, monospace))
-        self.set_child(view)
+        window = Gtk.ScrolledWindow(hexpand=True, vexpand=True)
+        window.set_child(view)
+        self.add_named(window, "rows")
+        self.otherwise = Gtk.Label(label=otherwise, wrap=True)
+        self.otherwise.add_css_class("dim-label")
+        self.add_named(self.otherwise, "nothing")
+        self.set_visible_child_name("nothing" if otherwise else "rows")
 
     def _column(self, title: str, index: int, monospace: bool) -> Gtk.ColumnViewColumn:
         made = Gtk.SignalListItemFactory()
@@ -58,10 +70,19 @@ class Table(Gtk.ScrolledWindow):
         item.get_child().set_text(cell(item.get_item().cells, index))
 
     def show(self, rows) -> None:
-        """What the table holds from now on."""
+        """What the table holds from now on; where that is nothing, what it says
+        instead."""
         self.store.remove_all()
         for cells in rows:
             self.store.append(Row(tuple(cells)))
+        self.set_visible_child_name(
+            "rows" if rows or not self.otherwise.get_text() else "nothing")
+
+    @property
+    def saying(self) -> str:
+        """What is being shown in place of rows, where anything is."""
+        return (self.otherwise.get_text()
+                if self.get_visible_child_name() == "nothing" else "")
 
     @property
     def rows(self) -> list[tuple[str, ...]]:

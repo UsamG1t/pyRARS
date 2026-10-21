@@ -103,8 +103,9 @@ again. What a *person* changed with `set` or `poke` is not a step of the machine
 but a step back still puts back what that step itself changed, because that is what taking a step
 back means.
 
-`restart` begins the program again, keeping the breakpoints and the watches, putting the devices back
-where they began, and letting the program read the same input over.
+`restart` begins the program again, keeping the breakpoints and the watches and putting the devices
+back where they began. It is a *fresh* run: the world outside is not put back with it, so a program
+that asks for a line asks again rather than silently reading what it was given last time.
 
 ## Three commands that guess
 

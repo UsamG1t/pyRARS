@@ -75,6 +75,15 @@ FILES = (
     Action("close_tab", "Close", "Close this file", "<Primary>w", frozenset()),
     Action("find", "Find", "Find and replace in this file", "<Primary>f",
            frozenset()),
+    Action("reference", "What can be written…",
+           "Every instruction, directive and register the assembler takes, with "
+           "what each of them means", "F1", frozenset()),
+    Action("project", "The program…",
+           "What the program IS: the files it is made of, the width of the machine, "
+           "the memory configuration", "<Primary>p", frozenset()),
+    Action("toggle_break", "Breakpoint here",
+           "Stop the run before the line the cursor is on; the margin does the "
+           "same when it is clicked", "<Primary>b", frozenset()),
     Action("undo", "Undo", "Take back the last change to this file", "<Primary>z",
            frozenset()),
     Action("redo", "Redo", "Do again what was taken back", "<Primary><Shift>z",
@@ -100,9 +109,12 @@ def possible_of_a_file(pages: int = 0, modified: bool = False, named: bool = Tru
     is saved only when it has been changed; everything else needs a file open at
     all, and undo and redo need something to undo.
     """
+    # What the program IS can be said whether anything is open or not: a project
+    # may name files nobody has opened.
     if not pages:
-        return frozenset({"new", "open"})
-    doing = {"new", "open", "save_as", "close_tab", "find"}
+        return frozenset({"new", "open", "project", "reference"})
+    doing = {"new", "open", "project", "reference", "save_as", "close_tab",
+             "find", "toggle_break"}
     if modified or not named:
         doing.add("save")
     if undo:

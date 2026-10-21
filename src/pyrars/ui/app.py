@@ -18,10 +18,11 @@ class Application(Adw.Application):
     """What holds the window, the actions and their keys together."""
 
     def __init__(self, project: Project | None = None,
-                 files: tuple[str, ...] = ()) -> None:
+                 files: tuple[str, ...] = (), where: str = "") -> None:
         super().__init__(application_id=NAME, flags=Gio.ApplicationFlags.FLAGS_NONE)
         self.project = project
         self.files = files
+        self.where = where  # the file the project was read from, where there is one
         self.window: Window | None = None
 
     def do_startup(self) -> None:
@@ -33,6 +34,9 @@ class Application(Adw.Application):
             doing.connect("activate", self._asked, action.name)
             self.add_action(doing)
             self.set_accels_for_action(f"app.{action.name}", [action.keys])
+        clearing = Gio.SimpleAction.new("clear_console", None)
+        clearing.connect("activate", self._clearing)
+        self.add_action(clearing)
         quitting = Gio.SimpleAction.new("quit", None)
         quitting.connect("activate", lambda *gone: self.quit())
         self.add_action(quitting)
@@ -41,9 +45,13 @@ class Application(Adw.Application):
     def do_activate(self) -> None:
         if self.window is None:
             self.window = Window(application=self, project=self.project,
-                                 files=self.files)
+                                 files=self.files, where=self.where)
             self.window.connect("close-request", self._closing)
         self.window.present()
+
+    def _clearing(self, action, parameter) -> None:
+        if self.window is not None:
+            self.window.clear_console()
 
     def _asked(self, action, parameter, name: str) -> None:
         if self.window is not None:

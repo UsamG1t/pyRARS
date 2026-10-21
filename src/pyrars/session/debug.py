@@ -288,10 +288,6 @@ class Session:
         # says so instead of wandering: the way back is a restart - or a step
         # back, for the journal reaches over the end of a run like anywhere else.
         self.ended = False
-        # Where the world outside stood when the session began, so that a restart
-        # can put it back: the program reads the same input again, as it does after
-        # a step back under `Options.debug` (the decision of stage 21).
-        self._start = self.io.mark()
         self._build()
 
     # ------------------------------------------------------------- the machine
@@ -316,7 +312,15 @@ class Session:
 
     def restart(self) -> Stopped:
         """The program from the beginning. What was asked to be watched stays; what
-        the models counted is forgotten."""
+        the models counted is forgotten.
+
+        The world outside is NOT put back with it (user decision 2026-10-21): a
+        restart is a fresh run, and a program that asks for a line asks again. It
+        was the other way at first - a restart put back what had been read, by the
+        same reasoning as a step back - and it read as the program silently not
+        asking, which is no use to anybody watching. A step back is unchanged:
+        stepping back and forward again must give the same thing twice.
+        """
         for end in self._ends.values():
             end()
         self._ends.clear()
@@ -325,7 +329,6 @@ class Session:
         self._watches = {number: replace(watch, hits=0)
                          for number, watch in self._watches.items()}
         self.ended = False
-        self.io.rewind(self._start)
         self._build()
         return Stopped(NOTHING, self.where())
 

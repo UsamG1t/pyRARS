@@ -23,6 +23,8 @@ from pyrars.session import project as projects  # noqa: E402
 from pyrars.session.project import Project  # noqa: E402
 from pyrars.ui import actions, shown  # noqa: E402
 from pyrars.ui.editor import Editor  # noqa: E402
+from pyrars.ui.help_window import HelpWindow  # noqa: E402
+from pyrars.ui.project_window import ProjectWindow  # noqa: E402
 from pyrars.ui.table import Table  # noqa: E402
 from pyrars.values import VALUE_FORMATS  # noqa: E402
 
@@ -56,7 +58,7 @@ class Window(Adw.ApplicationWindow):
     __gtype_name__ = "PyrarsWindow"
 
     def __init__(self, project: Project | None = None, files: tuple[str, ...] = (),
-                 cache: str | None = None, **kept) -> None:
+                 cache: str | None = None, where: str = "", **kept) -> None:
         super().__init__(title="pyRARS", **kept)
         self.project = project
         self.state = NOTHING
@@ -69,13 +71,24 @@ class Window(Adw.ApplicationWindow):
         self.editor.marked.append(self._breakpoint_changed)
         self.format = "hex"
         self.program = None
+        # Where the project came from, when one was opened from a file; a project
+        # made in the window has nowhere yet.
+        self.where_the_project_is = where
         self.standing = Gtk.Label(xalign=0.0, selectable=True)
         self.standing.add_css_class("monospace")
+        # A table with nothing in it says why: "is there nothing, or is this
+        # broken?" is two questions, and only one of them is being asked.
         self.views_of = {
-            "registers": Table(shown.REGISTERS), "floats": Table(shown.FLOATS),
-            "control": Table(shown.CONTROL), "text": Table(shown.TEXT),
-            "data": Table(shown.DATA), "labels": Table(shown.LABELS),
-            "frames": Table(shown.FRAMES),
+            "registers": Table(shown.REGISTERS),
+            "floats": Table(shown.FLOATS),
+            "control": Table(shown.CONTROL),
+            "text": Table(shown.TEXT, "No program is assembled yet"),
+            "data": Table(shown.DATA, "The program lays out no data"),
+            "labels": Table(shown.LABELS, "The program names nothing"),
+            "frames": Table(shown.FRAMES,
+                            "The run is inside no call.\n"
+                            "A frame appears for every call it is inside, as far as "
+                            "the calling convention lets anyone tell."),
         }
         self.console = _telling()
         self.messages = _telling()
@@ -141,11 +154,18 @@ class Window(Adw.ApplicationWindow):
         files = Gio.Menu()
         for name in ("new", "open", "save", "save_as", "close_tab"):
             files.append(actions.BY_NAME[name].label, f"app.{name}")
+        files.append(actions.BY_NAME["project"].label, "app.project")
+        helping = Gio.Menu()
+        helping.append(actions.BY_NAME["reference"].label, "app.reference")
         changes = Gio.Menu()
-        for name in ("undo", "redo", "find"):
+        for name in ("undo", "redo", "find", "toggle_break"):
             changes.append(actions.BY_NAME[name].label, f"app.{name}")
         menu.append_section(None, files)
         menu.append_section(None, changes)
+        menu.append_section(None, helping)
+        running = Gio.Menu()
+        running.append("Clear the console", "app.clear_console")
+        menu.append_section(None, running)
         menu.append_section(None, _one_item("Quit", "app.quit"))
         return Gtk.MenuButton(icon_name="open-menu-symbolic", menu_model=menu,
                               tooltip_text="Everything else")
@@ -217,8 +237,11 @@ class Window(Adw.ApplicationWindow):
             _OF_A_FILE[name](self)
             return
         if name == "assemble":
+            self.clear_console()
             self._assembled()
             return
+        if name == "restart":
+            self.clear_console()
         getattr(self.control, {"continue": "carry_on"}.get(name, name))()
 
     def allowed(self) -> frozenset[str]:
@@ -241,20 +264,66 @@ class Window(Adw.ApplicationWindow):
     # ---------------------------------------------------------------- the files
 
     def _assembled(self) -> None:
-        """Assemble what is on the screen.
+        """Assemble THE PROGRAM, which is one file unless a project says otherwise.
+
+        Several files open in an editor are several things somebody is working on,
+        not one program in several pieces: assembling them together glued two
+        programs end to end, which is nobody's idea of a default (the architect,
+        2026-10-21). A program of several files is a PROJECT, and saying so is what
+        the project window is for.
 
         The assembler reads files from the disk, so everything that has been
-        changed is written there first; a file that has never been saved is asked
-        about rather than guessed at.
+        changed is written there first.
         """
         self.editor.save_every_change()
-        paths = self.editor.paths
-        if not paths:
-            self._said("nothing to assemble: no file of the program is saved yet")
+        if self.project is not None:
+            missing = [path for path in self.project.paths
+                       if not Path(path).exists()]
+            if missing:
+                self._said(f"{shown.name_of(missing[0])}: the project names a file "
+                           "that is not there")
+                return
+            self._said("assembling the project "
+                       f"{shown.name_of(self.where_the_project_is)}"
+                       if self.where_the_project_is else "assembling the project")
+            self.control.load(self.project)
             return
-        self.project = (self.project.with_files(paths) if self.project is not None
-                        else projects.of(paths, folder=str(Path(paths[0]).parent)))
-        self.control.load(self.project)
+        page = self.editor.page
+        if page is None or not page.path:
+            self._said("nothing to assemble: this file is not saved anywhere yet")
+            return
+        self._said(f"assembling {shown.name_of(page.path)}")
+        self.control.load(projects.of([page.path],
+                                      folder=str(Path(page.path).parent)))
+
+    def open_the_reference(self) -> HelpWindow:
+        """Everything that can be written in a program, for looking something up
+        when there is nothing to point at."""
+        reading = HelpWindow(self.project.xlen if self.project else 32,
+                             transient_for=self)
+        reading.present()
+        return reading
+
+    def ask_what_the_program_is(self) -> ProjectWindow:
+        """The window that says what the program is made of."""
+        asking = ProjectWindow(self.project, files=self.editor.paths,
+                               where=self.where_the_project_is,
+                               settled=self.the_program_is, transient_for=self)
+        asking.present()
+        return asking
+
+    def the_program_is(self, project: Project | None, where: str) -> None:
+        """What the project window answered with: a project, or nothing at all -
+        and nothing at all means the file being looked at is the program."""
+        self.project = project
+        self.where_the_project_is = where if project is not None else ""
+        self._files_changed()
+        if project is None:
+            self._said("the program is the file being looked at")
+            return
+        self._said("the program is " + ", ".join(
+            shown.name_of(path) for path in project.paths)
+            + (f" (kept in {shown.name_of(where)})" if where else ""))
 
     def open(self, path: str) -> None:
         """A file into the editor. A file that cannot be read is SAID, not thrown:
@@ -300,8 +369,10 @@ class Window(Adw.ApplicationWindow):
     def _files_changed(self) -> None:
         """The editor's tabs or their state changed."""
         page = self.editor.page
-        self.set_title(shown.window_title(page.path if page else None,
-                                          page.modified if page else False))
+        self.set_title(shown.window_title(
+            page.path if page else None, page.modified if page else False,
+            "" if self.project is None else shown.project_called(
+                self.where_the_project_is, len(self.project.files))))
         self._possible()
 
     # ------------------------------------------------------- what comes back
@@ -390,7 +461,8 @@ class Window(Adw.ApplicationWindow):
             for page in self.editor.pages:
                 if page.path == path and line in page.marked("breakpoint"):
                     page.toggle(line)
-            self._said(f"{_short(path)}:{line}: no instruction of the program is "
+            self._said(f"{shown.name_of(path)}:{line}: no instruction of the "
+                       "program is "
                        "there, so nothing can stop before it")
         if missed:
             self._text_again()
@@ -457,6 +529,11 @@ class Window(Adw.ApplicationWindow):
     def session_is_open(self) -> bool:
         return self.state != NOTHING
 
+    def clear_console(self) -> None:
+        """A run that begins has a console of its own: what the last one said is
+        not what this one is saying, and two of them in one place read as one."""
+        self.console.get_buffer().set_text("")
+
     def _typed(self) -> None:
         """A line for the program. It may be typed before the program asks for it,
         as it may at a terminal, and it waits here until the program reads it."""
@@ -519,6 +596,9 @@ _OF_A_FILE = {
     "save_as": lambda window: window._saving_as(),
     "close_tab": lambda window: window.editor.close(),
     "find": lambda window: window.editor.find(),
+    "toggle_break": lambda window: window.editor.toggle_breakpoint_here(),
+    "project": lambda window: window.ask_what_the_program_is(),
+    "reference": lambda window: window.open_the_reference(),
     "undo": lambda window: window.editor.undo(),
     "redo": lambda window: window.editor.redo(),
 }

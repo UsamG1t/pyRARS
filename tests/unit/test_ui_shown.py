@@ -26,8 +26,23 @@ def test_a_tab_says_where_its_file_really_is(tmp_path):
         tmp_path / "sum.s")
 
 
+def test_what_the_program_is_called_in_the_title():
+    from pyrars.ui.shown import project_called
+
+    # one kept in a file is called by that file
+    assert project_called("/home/someone/thing.pyrars.json", 3) == "thing.pyrars.json"
+    # one made in the window is called by what it holds, which is all there is
+    assert project_called("", 3) == "a project of 3 files"
+    # and one of a single file is called nothing: it does to the program exactly
+    # what no project does, and a title saying so twice says nothing
+    assert project_called("", 1) == ""
+    assert project_called("", 0) == ""
+
+
 def test_the_window_says_what_is_being_worked_on():
     assert window_title("/home/someone/sum.s") == "sum.s - pyRARS"
+    assert window_title("/home/someone/sum.s", False, "thing.pyrars.json") == (
+        "sum.s - thing.pyrars.json - pyRARS")
     assert window_title("/home/someone/sum.s", True) == f"sum.s {CHANGED} - pyRARS"
     assert window_title(None) == f"{UNTITLED} - pyRARS"
 

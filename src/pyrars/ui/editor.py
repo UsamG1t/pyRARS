@@ -19,8 +19,10 @@ import gi
 gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
 gi.require_version("GtkSource", "5")
+gi.require_version("GdkPixbuf", "2.0")
 
-from gi.repository import Adw, Gio, GLib, GObject, Gtk, GtkSource  # noqa: E402
+from gi.repository import (  # noqa: E402
+    Adw, GdkPixbuf, Gio, GLib, GObject, Gtk, GtkSource)
 
 from pyrars.ui import completions, shown  # noqa: E402
 from pyrars.ui.help import about  # noqa: E402
@@ -29,12 +31,43 @@ from pyrars.ui.highlighting import ID, language  # noqa: E402
 # What the margin of the editor can hold, and what each of them looks like. A
 # breakpoint and the place the machine stands at are OURS; the other two are what
 # the assembler said about the line.
+#
+# The two that are ours are DRAWN rather than named, because a named symbolic icon
+# is painted in the colour of the text around it - which is grey, and grey in a
+# margin is not seen at all. A breakpoint is the red dot every debugger uses, and
+# the place the machine stands at is an arrow of its own colour.
+RED = (0xCC, 0x24, 0x24)
+GREEN = (0x2E, 0x9E, 0x3E)
 MARKS = {
     shown.ERROR: ("dialog-error-symbolic", 30),
     shown.WARNING: ("dialog-warning-symbolic", 20),
-    "breakpoint": ("media-record-symbolic", 10),
-    "here": ("go-next-symbolic", 40),
+    "breakpoint": (("dot", RED), 10),
+    "here": (("arrow", GREEN), 40),
 }
+SIZE = 16  # how wide a drawn mark is
+
+
+def drawn(shape: str, colour: tuple[int, int, int]) -> GdkPixbuf.Pixbuf:
+    """A mark of our own, drawn here so that it has a colour of its own.
+
+    A dot is a disc with a soft edge; an arrow is a triangle pointing the way the
+    machine is about to go. Both are drawn a pixel at a time, which for sixteen by
+    sixteen is nothing at all and saves carrying an image about.
+    """
+    middle, red, green, blue = (SIZE - 1) / 2, *colour
+    data = bytearray()
+    for y in range(SIZE):
+        for x in range(SIZE):
+            if shape == "dot":
+                far = ((x - middle) ** 2 + (y - middle) ** 2) ** 0.5
+                how = max(0.0, min(1.0, middle - 2.0 - far))
+            else:  # an arrow, as wide as it is tall
+                reach = (SIZE - 2 - x) / 2.0
+                how = 1.0 if 1 <= x <= SIZE - 3 and abs(y - middle) <= reach else 0.0
+            data += bytes((red, green, blue, int(255 * how)))
+    return GdkPixbuf.Pixbuf.new_from_bytes(
+        GLib.Bytes.new(bytes(data)), GdkPixbuf.Colorspace.RGB, True, 8,
+        SIZE, SIZE, SIZE * 4)
 
 
 def languages(folder: str | None = None) -> GtkSource.LanguageManager:
@@ -85,7 +118,9 @@ class Page(Gtk.Box):
         # every time, and anything hung on the old one is gone.
         self.says: dict[tuple[str, int], str] = {}
         for category, (icon, priority) in MARKS.items():
-            look = GtkSource.MarkAttributes(icon_name=icon)
+            look = (GtkSource.MarkAttributes(pixbuf=drawn(*icon))
+                    if isinstance(icon, tuple)
+                    else GtkSource.MarkAttributes(icon_name=icon))
             look.connect("query-tooltip-markup", self._said_of_a_mark)
             self.view.set_mark_attributes(category, look, priority)
         # What a word is, where the pointer rests on one.
@@ -147,25 +182,25 @@ class Page(Gtk.Box):
         self.mark(category, line)
         return True
 
+    def help_at(self, x: int, y: int) -> str | None:
+        """What the word at a place of the window is, written as a tooltip shows
+        it - or nothing, where that place holds no word anybody can tell of."""
+        inside_x, inside_y = self.view.window_to_buffer_coords(
+            Gtk.TextWindowType.TEXT, x, y)
+        found, place = self.view.get_iter_at_location(inside_x, inside_y)
+        if not found:
+            return None
+        return told_of(about(_word_at(place)))
+
     def _about_a_word(self, view, x: int, y: int, keyboard: bool,
                       tooltip: Gtk.Tooltip) -> bool:
         """What the word under the pointer is, from the tables of the assembler."""
         if keyboard:
             return False
-        where = view.window_to_buffer_coords(Gtk.TextWindowType.TEXT, x, y)
-        found, place = view.get_iter_at_location(where[1], where[2])
-        if not found:
+        markup = self.help_at(x, y)
+        if markup is None:
             return False
-        one = about(_word_at(place))
-        if one is None:
-            return False
-        lines = [f"<b>{GLib.markup_escape_text(one.word)}</b>  <i>{one.kind}</i>",
-                 GLib.markup_escape_text(one.about)]
-        for index, form in enumerate(one.forms):
-            becomes = one.becomes[index] if index < len(one.becomes) else ""
-            lines.append(GLib.markup_escape_text(
-                f"{form}" + (f"   \u2192 {becomes}" if becomes else "")))
-        tooltip.set_markup("\n".join(lines))
+        tooltip.set_markup(markup)
         return True
 
     def save(self, path: str | None = None) -> str:
@@ -285,6 +320,15 @@ class Editor(Gtk.Box):
         page = next((one for one in self.pages if one.view is view), None)
         if page is not None:
             self.toggle_breakpoint(page, place.get_line() + 1)
+
+    def toggle_breakpoint_here(self) -> int | None:
+        """A breakpoint on the line the cursor is on; answers with the line."""
+        page = self.page
+        if page is None:
+            return None
+        line = page.buffer.get_iter_at_mark(page.buffer.get_insert()).get_line() + 1
+        self.toggle_breakpoint(page, line)
+        return line
 
     def toggle_breakpoint(self, page: Page, line: int) -> bool:
         """Put a breakpoint on a line or take it off, and tell whoever is watching
@@ -497,6 +541,21 @@ class Words(GObject.Object, GtkSource.CompletionProvider):
             buffer.delete(start, end)
         buffer.insert(start, proposal.text)
         buffer.end_user_action()
+
+
+def told_of(one) -> str | None:
+    """What is known of a word, as a tooltip holds it."""
+    if one is None:
+        return None
+    lines = [f"<b>{GLib.markup_escape_text(one.word)}</b>  <i>{one.kind}</i>",
+             GLib.markup_escape_text(one.about)]
+    if one.means:
+        lines.append(f"<b>{GLib.markup_escape_text(one.means)}</b>")
+    for index, form in enumerate(one.forms):
+        becomes = one.becomes[index] if index < len(one.becomes) else ""
+        lines.append(GLib.markup_escape_text(
+            form + (f"   \u2192 {becomes}" if becomes else "")))
+    return "\n".join(lines)
 
 
 def _word_at(place) -> str:

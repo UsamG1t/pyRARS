@@ -657,14 +657,18 @@ def test_the_prompt_of_the_program_keeps_the_debugger_off_its_line(tmp_path):
     assert any(line.startswith("exited 0 after") for line in lines(out))
 
 
-def test_a_restart_lets_the_program_read_the_same_input_again(tmp_path):
-    """A restart puts back the world the session owns, as a step back does under a
-    debugger: the program is given the same input a second time."""
+def test_a_restart_asks_the_person_again(tmp_path):
+    """A restart is a FRESH run (user decision 2026-10-21): the world outside is
+    not put back with it, so a program that asks for a line asks again.
+
+    It was the other way at first - a restart put back what had been read, by the
+    same reasoning as a step back - and watching it, a program that silently did
+    not ask was of no use to anybody. A step back is unchanged.
+    """
     _, out, _ = session(tmp_path, "continue", "restart", "continue", source=ASKS,
-                        given="Ann\n")
-    assert out.count("Ann") == 2  # once for each run of the program
-    # and the second time nobody was asked for it: it had been read before
-    assert out.count("program> ") == 1
+                        given="Ann\nBob\n")
+    assert out.count("program> ") == 2  # asked once for each run
+    assert "Ann" in out and "Bob" in out  # and given a different line each time
 
 
 def test_a_restart_puts_a_device_back_where_it_began(tmp_path):

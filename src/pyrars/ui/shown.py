@@ -20,15 +20,42 @@ def tab_title(path: str | None, modified: bool = False) -> str:
     return f"{name} {CHANGED}" if modified else name
 
 
+def name_of(path: str) -> str:
+    """A file by its name alone: a window says where it is in a tooltip, not in
+    the middle of a sentence."""
+    return Path(path).name
+
+
 def tab_about(path: str | None) -> str:
     """What a tab says when the pointer rests on it: where the file really is."""
     return str(Path(path).resolve()) if path else "not saved anywhere yet"
 
 
-def window_title(path: str | None, modified: bool = False) -> str:
-    """The title of the window: the file being worked on, and the name of the tool
-    after it, as every editor writes it."""
-    return f"{tab_title(path, modified)} - pyRARS"
+def window_title(path: str | None, modified: bool = False,
+                 project: str = "") -> str:
+    """The title of the window: the file being worked on, the project it is part of
+    where there is one, and the name of the tool after them.
+
+    The project is named because it changes what Assemble does - one file, or
+    several - and nothing else on the screen would say so.
+    """
+    said = [tab_title(path, modified)]
+    if project:
+        said.append(project)
+    return " - ".join(said + ["pyRARS"])
+
+
+def project_called(where: str, files: int) -> str:
+    """What the program is called in the title, where it is worth calling anything.
+
+    A project kept in a file is called by that file. One made in the window and
+    never kept is called by what it holds - and a project of ONE file is called
+    nothing at all, because it does to the program exactly what no project does,
+    and a title that said so twice would be saying nothing.
+    """
+    if where:
+        return name_of(where)
+    return f"a project of {files} files" if files > 1 else ""
 
 
 ERROR = "error"

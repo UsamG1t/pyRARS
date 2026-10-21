@@ -256,6 +256,85 @@ def test_a_file_that_is_not_there_is_said_and_not_thrown(gtk, tmp_path):
         made.close_up()
 
 
+# --------------------------------------------- the console holds one run
+
+
+@pytest.mark.parametrize("window", [SPEAKS], indirect=True)
+def test_the_console_is_cleared_when_a_program_is_assembled(window, turning):
+    """What the last run said is not what this one is saying, and two of them in
+    one place read as one."""
+    window.do("assemble")
+    assert turning(lambda: window.state == "standing")
+    window.do("continue")
+    assert turning(lambda: "hello" in shown(window.console))
+    window.do("assemble")
+    assert turning(lambda: shown(window.console) == "")
+
+
+@pytest.mark.parametrize("window", [SPEAKS], indirect=True)
+def test_the_console_is_cleared_when_a_program_begins_again(window, turning):
+    window.do("assemble")
+    assert turning(lambda: window.state == "standing")
+    window.do("continue")
+    assert turning(lambda: "hello" in shown(window.console))
+    window.do("restart")
+    assert turning(lambda: shown(window.console) == "")
+
+
+@pytest.mark.parametrize("window", [SPEAKS], indirect=True)
+def test_the_console_may_be_cleared_by_hand(window, turning):
+    window.do("assemble")
+    assert turning(lambda: window.state == "standing")
+    window.do("continue")
+    assert turning(lambda: "hello" in shown(window.console))
+    window.clear_console()
+    assert shown(window.console) == ""
+
+
+@pytest.mark.parametrize("window", [ASKS], indirect=True)
+def test_a_line_typed_for_a_run_that_never_began_is_not_fed_to_the_next(window,
+                                                                       turning):
+    """A line is typed FOR a run - the one that was open when it was typed.
+    Somebody who types ahead and changes their mind must not find a program they
+    never meant to feed eating it."""
+    window.typing.set_text("111")
+    window._typed()
+    window.typing.set_text("222")
+    window._typed()
+    window.do("assemble")
+    assert turning(lambda: window.state == "standing")
+    window.do("continue")
+    # it asks, rather than taking what was typed before it existed
+    assert turning(lambda: window.state == "waiting")
+    assert shown(window.console) == ""
+    window.typing.set_text("7")
+    window._typed()
+    assert turning(lambda: window.state == "ended")
+    assert shown(window.console) == "7\n7"
+
+
+@pytest.mark.parametrize("window", [ASKS], indirect=True)
+def test_a_program_that_begins_again_asks_again(window, turning):
+    """A restart is a fresh run: what was typed for the last one is gone with it,
+    and the program asks for its own."""
+    window.do("assemble")
+    assert turning(lambda: window.state == "standing")
+    window.do("continue")
+    assert turning(lambda: window.state == "waiting")
+    window.typing.set_text("7")
+    window._typed()
+    assert turning(lambda: window.state == "ended")
+    window.do("restart")
+    assert turning(lambda: window.state == "standing")
+    window.do("continue")
+    assert turning(lambda: window.state == "waiting")  # asked again
+    assert shown(window.console) == ""  # and the console holds this run only
+    window.typing.set_text("9")
+    window._typed()
+    assert turning(lambda: window.state == "ended")
+    assert shown(window.console) == "9\n9"
+
+
 # ----------------------------------------- what the editor is told of a program
 
 
@@ -548,3 +627,67 @@ def _row(window, which: str, name: str):
         if row[0] == name:
             return row
     return None
+
+
+# ------------------------------------------- a table with nothing in it
+
+
+def test_a_table_with_nothing_in_it_says_why(window, turning):
+    """An empty table answers two questions at once - is there nothing, or is this
+    broken? - and only one of them is the one being asked."""
+    assert window.views_of["text"].saying == "No program is assembled yet"
+    window.do("assemble")
+    assert turning(lambda: window.state == "standing")
+    assert window.views_of["text"].saying == ""  # it holds rows now
+    assert window.views_of["frames"].saying.startswith("The run is inside no call")
+
+
+def test_the_frames_of_a_recursion(gtk, tmp_path, turning):
+    """A frame for every call the run is inside, which a recursion makes several
+    of - and the one view nothing else in the window shows."""
+    from pyrars.ui.window import Window
+
+    (tmp_path / "main.s").write_text("""\
+.globl main
+.text
+main:   li a0, 4
+        jal ra, fact
+        li a7, 10
+        ecall
+fact:   addi sp, sp, -8
+        sw ra, 4(sp)
+        sw a0, 0(sp)
+        li t0, 2
+        blt a0, t0, one
+        addi a0, a0, -1
+        jal ra, fact
+        lw t1, 0(sp)
+        mul a0, a0, t1
+        j back
+one:    li a0, 1
+back:   lw ra, 4(sp)
+        addi sp, sp, 8
+        ret
+""")
+    made = Window(files=(str(tmp_path / "main.s"),), cache=str(tmp_path / "cache"))
+    try:
+        made.do("assemble")
+        assert turning(lambda: made.state == "standing")
+        made.editor.toggle_breakpoint(made.editor.page, 17)  # `one:`, the bottom
+        assert turning(lambda: True)
+        made.do("continue")
+        assert turning(lambda: made.state == "standing"
+                       and made.views_of["frames"].rows != [])
+        frames = made.views_of["frames"].rows
+        assert len(frames) == 4  # fact(4) calling itself down to fact(1)
+        assert [row[0] for row in frames] == ["1", "2", "3", "4"]
+        assert all("<fact>" in row[1] for row in frames)
+        # the first was called from `main`, the rest from `fact` itself
+        assert frames[0][2] != frames[1][2]
+        assert frames[1][2] == frames[2][2] == frames[3][2]
+        # and every frame stands lower than the one before it
+        corners = [int(row[3], 16) for row in frames]
+        assert corners == sorted(corners, reverse=True)
+        assert made.views_of["frames"].saying == ""
+    finally:
+        made.close_up()

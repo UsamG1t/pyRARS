@@ -49,3 +49,30 @@ def turning(gtk):
         return False
 
     return turn
+
+
+@pytest.fixture
+def showing(gtk, turning):
+    """Put a widget in a window and let GTK lay it out.
+
+    Almost nothing needs this: a widget answers about itself without being seen.
+    What does need it is anything that reads the COORDINATES of the pointer, which
+    mean nothing until there is something on the screen for them to be measured
+    against. The window is small and goes away again when the test is over.
+    """
+    from gi.repository import Gtk
+
+    windows = []
+
+    def show(widget):
+        window = Gtk.Window(default_width=420, default_height=220)
+        window.set_child(widget)
+        window.present()
+        windows.append(window)
+        turning(lambda: widget.get_width() > 0, 3.0)
+        return widget
+
+    yield show
+    for window in windows:
+        window.set_child(None)
+        window.destroy()

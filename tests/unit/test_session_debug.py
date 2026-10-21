@@ -82,14 +82,15 @@ up:     lw ra, 0(sp)
 CALLS_ITSELF, UP, GOES_BACK = TEXT + 0x28, TEXT + 0x2C, TEXT + 0x14
 
 
-def session(source: str, tmp_path, **kept) -> Session:
+def session(source: str, tmp_path, io_=None, **kept) -> Session:
     """A session over an assembled program, writing into a string."""
     path = tmp_path / "p.s"
     path.write_text(source)
     program = assemble([str(path)], AsmOptions())
     assert program.diagnostics == (), program.diagnostics
-    return Session(program, io=ConsoleIO(out=io.StringIO(), errors=io.StringIO(),
-                                        reader=io.StringIO()), **kept)
+    world = io_ if io_ is not None else ConsoleIO(
+        out=io.StringIO(), errors=io.StringIO(), reader=io.StringIO())
+    return Session(program, io=world, **kept)
 
 
 @pytest.fixture
@@ -738,6 +739,39 @@ def test_the_program_from_the_beginning(sum_session):
     assert [one.place.address for one in sum_session.breaks()] == [KEEP]
     assert sum_session.watches() == [watched]
     assert sum_session.frames() == []
+
+
+def test_a_restart_does_not_put_the_world_back(tmp_path):
+    """A restart is a FRESH run (user decision 2026-10-21): a program that asks for
+    a line asks again, rather than silently reading what it was given before.
+
+    A step back is unchanged - stepping back and forward again must give the same
+    thing twice - and that is tested with the journal, where it belongs.
+    """
+    asking = """\
+.globl main
+.data
+buffer: .space 32
+.text
+main:   li a7, 8
+        la a0, buffer
+        li a1, 32
+        ecall
+        li a7, 4
+        la a0, buffer
+        ecall
+        li a7, 93
+        li a0, 0
+        ecall
+"""
+    out, reader = io.StringIO(), io.StringIO("Ann\nBob\n")
+    s = session(asking, tmp_path,
+                io_=ConsoleIO(out=out, errors=io.StringIO(), reader=reader))
+    s.carry_on()
+    assert "Ann" in out.getvalue()
+    s.restart()
+    s.carry_on()
+    assert "Bob" in out.getvalue()  # the next line, because it asked again
 
 
 def test_a_restart_forgets_what_the_watches_counted(sum_session):

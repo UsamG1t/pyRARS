@@ -88,11 +88,28 @@ def test_the_guesses_say_that_they_are_guesses():
 
 
 def test_nothing_but_opening_with_no_file_open():
-    assert possible_of_a_file() == {"new", "open"}
+    # what the program IS and what may be written in one can always be asked
+    assert possible_of_a_file() == {"new", "open", "project", "reference"}
 
 
 def test_what_can_be_done_to_a_file_that_is_open():
-    assert possible_of_a_file(1) == {"new", "open", "save_as", "close_tab", "find"}
+    assert possible_of_a_file(1) == {"new", "open", "project", "reference",
+                                     "save_as", "close_tab", "find",
+                                     "toggle_break"}
+
+
+def test_the_breakpoint_by_key_says_where_it_lands():
+    """"here" is the word that matters: it acts on the line the cursor is on, which
+    is what tells it from the margin, where a line is chosen by pointing at it."""
+    assert BY_NAME["toggle_break"].label == "Breakpoint here"
+    assert "the line the cursor is on" in BY_NAME["toggle_break"].about
+
+
+def test_a_breakpoint_can_be_put_in_before_there_is_a_program():
+    """A line is marked in a file, and a file is there before any of it is
+    assembled: open, mark, assemble is the ordinary way of working."""
+    assert "toggle_break" in possible_of_a_file(1)
+    assert "toggle_break" not in possible_of_a_file(0)
 
 
 def test_a_file_is_saved_when_there_is_something_to_save():

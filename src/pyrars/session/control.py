@@ -120,6 +120,18 @@ class Waiting:
         """The input is open once more, for a run that begins again."""
         self.over = False
 
+    def forget(self) -> None:
+        """Throw away what was typed and never read.
+
+        A line is typed FOR a run - the one that was open when it was typed. A run
+        that begins afresh must ask for its own, or somebody who typed ahead and
+        then changed their mind would be feeding a program they never meant to.
+        """
+        self.again()
+        self.kept = ""
+        while not self.lines.empty():
+            self.lines.get_nowait()
+
     def readline(self) -> str:
         """One line. An answer may hold several, or none of a line at all, so what
         is left over waits here for the next asking."""
@@ -217,7 +229,7 @@ class RunController:
         self._movement("until", lambda session: session.until(address))
 
     def restart(self) -> None:
-        self.waiting.again()
+        self.waiting.forget()
         self._movement("restart", lambda session: session.restart())
 
     def look(self) -> None:
@@ -353,7 +365,7 @@ class RunController:
         if program.failed:
             self.session, self.state = None, NOTHING
             return Answer(LOAD, program)
-        self.waiting.again()
+        self.waiting.forget()
         self.session = Session(program, io=self.io, arguments=arguments,
                                watch=self._turn, **kept)
         self.state = STANDING

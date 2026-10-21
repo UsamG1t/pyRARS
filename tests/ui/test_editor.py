@@ -385,3 +385,140 @@ def test_a_word_is_not_taken_across_a_line(editor):
     page = editor.add("addi\nt0\n").get_child()
     assert _word_at(page.buffer.get_iter_at_offset(0)) == "addi"
     assert _word_at(page.buffer.get_iter_at_offset(5)) == "t0"
+
+
+def test_what_a_word_of_the_program_is_told_of_where_the_pointer_rests(editor,
+                                                                      showing):
+    """A place of the window, by its coordinates, to the word that is there.
+
+    This needs the page to be ON THE SCREEN: coordinates mean nothing until there
+    is a layout to measure them against, and that is exactly where the mistake was
+    - two numbers come back from `window_to_buffer_coords` and three were taken,
+    so the tooltip never once appeared and nothing noticed.
+    """
+    page = editor.add("addi t0, t1, 1\n").get_child()
+    showing(page)
+    markup = page.help_at(8, 8)
+    assert markup is not None
+    assert "<b>addi</b>" in markup
+    assert "I extension" in markup  # what kind of word it is
+    assert "Adds a number to rs1" in markup  # what it DOES, which is what is wanted
+    assert "addi rd, rs1, imm" in markup  # and how it is written
+
+
+def test_a_place_that_holds_no_word_anybody_knows(editor, showing):
+    page = editor.add("loopy t0\n").get_child()  # a word of the program's own
+    showing(page)
+    assert page.help_at(8, 8) is None
+
+
+def test_the_coordinates_are_those_of_the_window_and_not_of_the_text(editor,
+                                                                    showing,
+                                                                    turning):
+    """A pointer rests at a place of the WINDOW, and the text under it has been
+    scrolled: the two are the same only while the view sits at the top, which is
+    exactly where a test that forgot the difference would pass."""
+    lines = ["addi t0, t1, 1"] + ["nop"] * 200 + ["csrr t0, fcsr"]
+    page = editor.add("\n".join(lines) + "\n").get_child()
+    showing(page)
+    far = page.buffer.get_iter_at_line(len(lines) - 1)[1]
+    page.buffer.place_cursor(far)
+    page.view.scroll_to_iter(far, 0.0, True, 0.0, 0.0)
+    assert turning(lambda: page.view.get_visible_rect().y > 100)
+    markup = page.help_at(8, 8)
+    assert markup is not None
+    assert "addi" not in markup  # which is the first line, far above
+
+
+def test_a_place_of_the_window_that_is_no_place_of_the_program(editor, showing):
+    page = editor.add("addi t0, t1, 1\n").get_child()
+    showing(page)
+    assert page.help_at(-100, -100) is None
+
+
+def test_what_is_told_of_a_pseudo_instruction(editor):
+    from pyrars.ui.editor import told_of
+    from pyrars.ui.help import about
+
+    markup = told_of(about("li"))
+    assert "<b>li</b>" in markup
+    assert "Puts a number in rd" in markup
+    assert "li rd, imm32   → lui + addi" in markup
+    assert told_of(None) is None
+
+
+def test_a_breakpoint_on_the_line_the_cursor_is_on(editor, file):
+    """For whoever did not find the margin: the same mark, by a key."""
+    page = editor.open(file).get_child()
+    page.buffer.place_cursor(page.buffer.get_iter_at_line(2)[1])
+    assert editor.toggle_breakpoint_here() == 3
+    assert page.marked("breakpoint") == [3]
+    assert editor.toggle_breakpoint_here() == 3
+    assert page.marked("breakpoint") == []
+
+
+def test_a_breakpoint_by_key_with_no_file_open(editor):
+    assert editor.toggle_breakpoint_here() is None
+
+
+# --------------------------------------------------- what a mark looks like
+
+
+def filled(pixbuf, x: int, y: int) -> bool:
+    from pyrars.ui.editor import SIZE
+
+    return pixbuf.get_pixels()[(y * SIZE + x) * 4 + 3] > 120
+
+
+def colour_at(pixbuf, x: int, y: int) -> tuple[int, int, int]:
+    from pyrars.ui.editor import SIZE
+
+    start = (y * SIZE + x) * 4
+    return tuple(pixbuf.get_pixels()[start:start + 3])
+
+
+def test_a_mark_of_our_own_is_drawn_rather_than_named(gtk):
+    """A named symbolic icon is painted in the colour of the text around it, which
+    in a margin is grey, and grey in a margin is not seen at all."""
+    from pyrars.ui.editor import MARKS, RED, GREEN
+
+    assert MARKS["breakpoint"][0] == ("dot", RED)
+    assert MARKS["here"][0] == ("arrow", GREEN)
+    assert isinstance(MARKS["error"][0], str)  # those two keep their icons
+
+
+def test_a_breakpoint_is_a_round_red_dot(gtk):
+    from pyrars.ui.editor import RED, SIZE, drawn
+
+    dot = drawn("dot", RED)
+    assert (dot.get_width(), dot.get_height()) == (SIZE, SIZE)
+    middle = SIZE // 2
+    assert filled(dot, middle, middle)
+    assert colour_at(dot, middle, middle) == RED
+    assert not filled(dot, 0, 0)  # the corners are outside a circle
+    assert not filled(dot, SIZE - 1, SIZE - 1)
+    # as wide as it is tall, which a disc is and a blob is not
+    across = sum(filled(dot, x, middle) for x in range(SIZE))
+    down = sum(filled(dot, middle, y) for y in range(SIZE))
+    assert across == down > 4
+
+
+def test_the_place_the_machine_stands_at_is_an_arrow_pointing_on(gtk):
+    from pyrars.ui.editor import GREEN, SIZE, drawn
+
+    arrow = drawn("arrow", GREEN)
+    middle = SIZE // 2
+    assert filled(arrow, 2, middle) and colour_at(arrow, 2, middle) == GREEN
+    # wide where it begins and a point where it ends: it points the way on
+    begins = sum(filled(arrow, 2, y) for y in range(SIZE))
+    ends = sum(filled(arrow, SIZE - 4, y) for y in range(SIZE))
+    assert begins > ends
+    assert not filled(arrow, SIZE - 1, middle)
+
+
+def test_a_mark_is_drawn_in_the_colour_it_was_given(gtk):
+    from pyrars.ui.editor import SIZE, drawn
+
+    blue = (0x10, 0x20, 0xF0)
+    assert colour_at(drawn("dot", blue), SIZE // 2, SIZE // 2) == blue
+    assert colour_at(drawn("arrow", blue), 2, SIZE // 2) == blue
