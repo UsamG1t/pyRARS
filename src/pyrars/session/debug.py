@@ -204,7 +204,8 @@ class DeviceSeen:
     name: str
     offset: int | None
     size: int | None
-    state: dict[str, object]
+    state: dict[str, object]  # what to READ about it, in its own words
+    looks: dict[str, object] = field(default_factory=dict)  # and what to DRAW it by
 
 
 @dataclass(frozen=True, slots=True)
@@ -769,7 +770,8 @@ class Session:
         if self.bus is None:
             return []
         return [DeviceSeen(part.name, getattr(part, "offset", None),
-                           getattr(part, "size", None), part.state())
+                           getattr(part, "size", None), part.state(),
+                           part.looks() if hasattr(part, "looks") else {})
                 for part in self.bus.parts]
 
     def device(self, name: str) -> DeviceSeen:

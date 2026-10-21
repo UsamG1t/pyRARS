@@ -1,0 +1,231 @@
+"""The panels: the widgets that paint what `ui/drawing.py` worked out.
+
+What is DRAWN is tested without GTK (`tests/unit/test_ui_drawing.py`); what is
+tested here is that the brush works - that every picture the project makes can be
+painted, that a device gets the widget it ought to have, and that the one device
+whose picture is not boxes and words but an image of memory is packed into that
+image correctly.
+"""
+
+import cairo
+import pytest
+
+pytestmark = pytest.mark.ui
+
+
+def painted(widget, width: int = 400, height: int = 300):
+    """Paint a widget into an image nobody will look at, by calling the very
+    function GTK calls. Anything the painting cannot do raises here."""
+    surface = cairo.ImageSurface(cairo.FORMAT_ARGB32, width, height)
+    widget._drawn(widget, cairo.Context(surface), width, height)
+    return surface
+
+
+def seen(name: str, offset=0x10, size=5, state=None, looks=None):
+    from pyrars.session.debug import DeviceSeen
+
+    return DeviceSeen(name, offset, size, state or {}, looks or {})
+
+
+# ------------------------------------------------------------------ the canvas
+
+
+def test_a_picture_is_painted_as_it_was_worked_out(gtk):
+    from pyrars.session.debug import CacheLine, CacheSeen, Setting
+    from pyrars.ui.canvas import Canvas
+    from pyrars.ui.drawing import cache_picture
+
+    cache = CacheSeen("cache", False, (Setting("block_bytes", 16),
+                                       Setting("sets", 2), Setting("ways", 2)),
+                      4, 1, 3, 0.25, 0, 0)
+    drawn = cache_picture([cache], [CacheLine("cache", 0, 0, 1, 0, 15, True)])
+    made = Canvas()
+    made.show(drawn)
+    assert made.picture is drawn
+    wide, tall = made.get_size_request()
+    assert wide >= int(drawn.width) and tall >= int(drawn.height)
+    painted(made)  # and it paints without a word of complaint
+
+
+def test_a_box_of_a_picture_lands_where_the_picture_put_it(gtk):
+    """The one thing the brush decides is the margin around a picture, so that a
+    box at nothing, nothing is not against the edge of the widget."""
+    from pyrars.ui.canvas import MARGIN, Canvas
+    from pyrars.ui.drawing import COLOURS, Part, Picture
+
+    made = Canvas()
+    made.show(Picture(40.0, 40.0, (Part(0.0, 0.0, 20.0, 20.0, fill="lit"),)))
+    surface = painted(made, 60, 60)
+    held, stride = surface.get_data(), surface.get_stride()
+
+    def pixel(x: int, y: int) -> tuple[int, ...]:
+        at = y * stride + 4 * x
+        return tuple(held[at:at + 3])
+
+    red = tuple(round(one * 255) for one in reversed(COLOURS["lit"]))
+    inside = pixel(int(MARGIN) + 4, int(MARGIN) + 4)
+    assert max(abs(one - other) for one, other in zip(inside, red)) <= 1
+    assert pixel(1, 1) == (0, 0, 0)  # and nothing is painted in the margin
+
+
+def test_every_picture_the_project_makes_can_be_painted(gtk):
+    """One test for all of them: a colour nobody has, or a word GTK cannot lay
+    out, would otherwise show up in a draw handler, where nothing is reported."""
+    from pyrars.session.debug import Setting, StageSeen, StatisticsSeen
+    from pyrars.ui import drawing
+    from pyrars.ui.canvas import Canvas
+
+    from tests.unit.test_ui_drawing import cache, lab
+
+    made = Canvas()
+    for picture in (
+            drawing.cache_picture([cache(accesses=1, misses=1)]),
+            drawing.pipeline_picture([StageSeen(0, "addi", (0, 1, 2, 3, 4), 1, 0)]),
+            drawing.lab_picture(lab(left=0x5A, key=3, counting=True, counter=7)),
+            drawing.bars_picture(StatisticsSeen(1, 1, 0, 0, 0, 0,
+                                                (Setting("alu", 1),), ())),
+            drawing.blocks_picture({"blocks": 3, "at": 1, "left": 1,
+                                    "working": True, "writing": False,
+                                    "refused": True}),
+            drawing.copying_picture({"copied": 1, "left": 1, "copying": True,
+                                     "from": 0, "to": 4, "refused": False})):
+        made.show(picture)
+        painted(made)
+
+
+def test_a_picture_on_the_screen(showing, gtk):
+    """Once through the real thing: GTK itself asks for the drawing, with a theme
+    and a colour of its own."""
+    from pyrars.ui.canvas import Canvas
+    from pyrars.ui.drawing import Part, Picture
+
+    made = showing(Canvas())
+    made.show(Picture(200.0, 60.0, (Part(0.0, 0.0, 80.0, 20.0, fill="clean",
+                                         edge="frame", text="here"),
+                                    Part(0.0, 30.0, text="and a word", dim=True))))
+    assert made.get_width() > 0
+
+
+# ------------------------------------------------------- the bitmap display
+
+
+def test_the_units_of_a_bitmap_become_the_pixels_of_an_image(gtk):
+    """One word of memory is one unit, and the low 24 bits of it are its colour.
+    The words are packed in one call, because a picture of 512 by 256 is a hundred
+    and thirty thousand of them."""
+    from pyrars.ui.canvas import Pixels
+
+    made = Pixels()
+    made.show({"units": (0xFF0000, 0x00FF00, 0x0000FF, 0xFFFFFF),
+               "columns": 2, "rows": 2, "unit_width": 3, "unit_height": 3})
+    assert made.get_size_request() == (6, 6)  # two units of three pixels
+    surface = painted(made, 6, 6)
+    held = surface.get_data()
+    stride = surface.get_stride()
+    # the first unit is red, and it fills the three by three it was given
+    for x in range(3):
+        for y in range(3):
+            assert tuple(held[y * stride + 4 * x:y * stride + 4 * x + 3]) \
+                == (0x00, 0x00, 0xFF)  # blue, green, red, as cairo holds them
+    assert tuple(held[0:3]) != tuple(held[12:15])  # and the next unit is not red
+
+
+def test_a_bitmap_with_nothing_in_it_paints_nothing(gtk):
+    from pyrars.ui.canvas import Pixels
+
+    made = Pixels()
+    made.show({})
+    assert made.get_size_request() == (0, 0)
+    painted(made, 4, 4)
+
+
+# ------------------------------------------------------- the panels themselves
+
+
+def test_every_device_gets_a_panel_and_the_right_one(gtk):
+    """A device with a picture gets it above its table; one whose whole state is
+    three numbers gets the numbers, because a drawing of a number says nothing the
+    number does not."""
+    from pyrars.devices import DEVICES
+    from pyrars.ui import devices
+    from pyrars.ui.canvas import Canvas, Pixels
+
+    expected = {"bitmap": Pixels, "keyboard": devices.Display, "lab": Canvas,
+                "disk": Canvas, "dma": Canvas}
+    for name in DEVICES:
+        panel = devices.Panel(name)
+        assert panel.device == name
+        if name in expected:
+            assert isinstance(panel.picture, expected[name]), name
+        else:
+            assert panel.picture is None, name
+
+
+def test_a_panel_puts_the_picture_beside_the_table(gtk):
+    """Beside and not above (the architect, 2026-10-22): the room the views have is
+    wide and shallow, while a picture and a table of names and values are both
+    narrow and long, so side by side each of them gets its whole height."""
+    from gi.repository import Gtk
+
+    from pyrars.ui.devices import Panel
+
+    pane = Panel("lab").get_first_child()
+    assert isinstance(pane, Gtk.Paned)
+    assert pane.get_orientation() == Gtk.Orientation.HORIZONTAL
+    assert pane.get_end_child() is not None  # the table, beside it
+
+
+def test_a_panel_says_where_its_device_answers(gtk):
+    from pyrars.ui.devices import Panel
+
+    panel = Panel("timer")
+    panel.show(seen("timer", 0x18, 16, {"clock": "wall", "time": 7}),
+               base=0xFFFF0000)
+    assert panel.table.rows[0] == ("where", "0xffff0018")
+    assert panel.table.rows[1] == ("size", "16 bytes")
+    assert dict(panel.table.rows)["time"] == "0x00000007"
+    panel.show(seen("timer", 0x18, 16, {"clock": "wall", "time": 7}), "dec",
+               0xFFFF0000)
+    assert dict(panel.table.rows)["time"] == "7"
+
+
+def test_a_panel_of_a_device_that_is_not_attached_keeps_what_it_had(gtk):
+    """The last thing a device held is more use than an empty panel: a run that
+    ended is still a run somebody is reading."""
+    from pyrars.ui.devices import Panel
+
+    panel = Panel("lab")
+    panel.show(seen("lab", state={"left": "0x01"},
+                    looks={"left": 1, "right": 0, "segments": ("a",), "keys": 4,
+                           "key": 0, "counting": False, "counter": 0,
+                           "period": 31, "keys tell": False}))
+    held = panel.table.rows
+    panel.show(None)
+    assert panel.table.rows == held
+
+
+def test_the_display_of_the_keyboard_shows_what_the_program_wrote(gtk):
+    from pyrars.ui.devices import Panel
+
+    panel = Panel("keyboard")
+    panel.show(seen("keyboard", 0x0, 16, {"shown": "hi"},
+                    {"text": "hi there", "columns": 80, "rows": 25,
+                     "queued": 2, "lost": 1, "busy": False}))
+    buffer = panel.picture.view.get_buffer()
+    said = buffer.get_text(buffer.get_start_iter(), buffer.get_end_iter(), False)
+    assert said.startswith("hi there")
+    assert "2 keys typed and not read yet" in said
+    assert "1 keys lost" in said
+
+
+def test_the_lab_is_drawn_from_the_numbers_it_reports(gtk):
+    from pyrars.ui.devices import Panel
+
+    panel = Panel("lab")
+    panel.show(seen("lab", looks={"left": 0xFF, "right": 0, "keys": 16, "key": 2,
+                                  "segments": tuple("abcdefg") + ("dot",),
+                                  "counting": False, "counter": 0, "period": 31,
+                                  "keys tell": False}))
+    lit = [part for part in panel.picture.picture.parts if part.fill == "lit"]
+    assert len(lit) == 9  # eight segments of the left display, and the key down
+    painted(panel.picture)

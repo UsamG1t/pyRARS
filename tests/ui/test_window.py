@@ -672,17 +672,49 @@ def test_a_file_that_is_nowhere_has_no_line_to_run_to(gtk, tmp_path, turning):
 # --------------------------------------------------- how fast the run goes
 
 
+def test_the_models_are_watched_while_a_slowed_run_goes(gtk, tmp_path, turning):
+    """The reason anybody slows a run down with a cache: the grid fills while the
+    program runs, instead of after it."""
+    from pyrars.session import settings as runs
+    from pyrars.ui import shown as writing
+    from pyrars.ui.window import Window
+
+    # a program that walks through memory and does not stop: a run to watch
+    (tmp_path / "main.s").write_text(
+        ".globl main\n.data\ntable: .space 256\n.text\n"
+        "main:  la t1, table\nloop:  lw t0, 0(t1)\n       addi t1, t1, 4\n"
+        "       j loop\n")
+    made = Window(files=(str(tmp_path / "main.s"),), cache=str(tmp_path / "cache"),
+                  settings=runs.Settings(cache={"sets": 4}))
+    try:
+        made.do("assemble")
+        assert turning(lambda: made.state == "standing")
+        made.how_fast.set_selected(writing.SPEEDS.index(10.0))
+        made.do("continue")
+        assert turning(lambda: made.state == "running")
+        # the cache is answered for WHILE the run goes on, and the grid with it
+        assert turning(lambda: any(row[1] == "accesses" and row[2] != "0"
+                                   for row in made.views_of["cache"].rows))
+        assert made.state == "running"
+        drawn = made.pictures["cache"].picture
+        assert any(part.fill == "clean" for part in drawn.parts)
+        made.do("pause")
+        assert turning(lambda: made.state == "standing")
+    finally:
+        made.close_up()
+
+
 def test_the_speed_chosen_reaches_the_run(window):
     """And with it the questions the controller is to answer while the run goes
     on: a window cannot ask for anything of its own while a movement is being
     carried out."""
     from pyrars.ui import shown as writing
-    from pyrars.ui.window import PLACES, REGISTERS
+    from pyrars.ui.window import MODELS, PLACES, REGISTERS
 
     window.how_fast.set_selected(len(writing.SPEEDS) - 1)  # the slowest there is
     assert window.speed == min(speed for speed in writing.SPEEDS if speed)
     assert window.control.speed == window.speed
-    assert set(window.control.watching) == {REGISTERS, PLACES}
+    assert set(window.control.watching) == {REGISTERS, PLACES, MODELS}
     window.how_fast.set_selected(0)  # as fast as it can again
     assert window.speed is None and window.control.speed is None
     assert window.control.watching == {}
@@ -735,17 +767,60 @@ def test_the_views_keep_up_while_a_slowed_run_goes(gtk, tmp_path, turning):
 # ------------------------- the things around the machine, and the models of it
 
 
-def test_the_views_of_the_models_say_why_they_are_empty(window, turning):
-    """A table with nothing in it answers two questions at once, and the one being
-    asked here is "where would I ask for this?" - so it says where."""
+def test_a_page_is_there_only_while_the_run_is_set_up_to_fill_it(window, turning):
+    """A page about a thing nobody asked to watch says nothing and takes the room
+    of a page that would (the architect, 2026-10-22). The counting is the one
+    thing a run comes with, so Counted is the one that is there to begin with."""
+    from pyrars.session import settings as runs
+
+    assert window.pages_wanted() == ["counted"]
+    titles = _titles(window)
+    assert titles[-1] == "Counted" and "Cache" not in titles
+    window.the_run_is(runs.Settings(cache={}, pipeline={}, statistics=False,
+                                    devices={"timer": {}, "dma": {}}))
+    assert window.pages_wanted() == ["cache", "pipeline", "device:dma",
+                                     "device:timer"]
+    titles = _titles(window)
+    assert titles[-4:] == ["Cache", "Pipeline", "DMA", "Timer"]
+    assert "Counted" not in titles  # nobody is counting any more
+    # and the pages that are always there are where they always were
+    assert titles[:6] == ["Text", "Data", "Labels", "Frames", "Console",
+                          "Messages"]
+    kept = window.panels["device:timer"]
+    window.the_run_is(runs.Settings())
+    assert _titles(window)[-1] == "Counted"
+    # a panel taken off the notebook and put back is the SAME panel: what it was
+    # holding is what somebody was reading
+    window.the_run_is(runs.Settings(devices={"timer": {}}))
+    assert window.panels["device:timer"] is kept
+    assert _titles(window)[-2:] == ["Counted", "Timer"]
+
+
+def test_a_page_of_a_model_puts_the_picture_beside_the_table(window):
+    """The same way round as a device's panel, and for the same reason: the views
+    are wide and shallow, and both a picture and a table are narrow and long."""
+    pane = window._page_of("cache")
+    assert isinstance(pane, Gtk.Paned)
+    assert pane.get_orientation() == Gtk.Orientation.HORIZONTAL
+
+
+def test_a_page_whose_model_the_machine_has_not_got_says_so(window, turning):
+    """The settings reach the machine at an Assemble, so a cache switched on while
+    a program is already open is a page with nothing in it until the program is
+    assembled again - which is what it says, rather than looking broken. This is
+    what a cache that showed nothing really was (the architect, 2026-10-22)."""
+    from pyrars.session import settings as runs
+
     window.do("assemble")
     assert turning(lambda: window.state == "standing")
-    for name in ("devices", "cache", "pipeline", "counted"):
-        assert window.views_of[name].rows == [] or name == "counted"
-    for name in ("devices", "cache", "pipeline"):
-        assert "The run window" in window.views_of[name].saying, name
-    # the counting is the one thing a run comes with, so it is there at once
-    assert turning(lambda: window.views_of["counted"].rows != [])
+    window.the_run_is(runs.Settings(cache={}))
+    assert "Cache" in _titles(window)
+    assert turning(lambda: "not been assembled since a cache was asked for"
+                   in window.views_of["cache"].saying)
+    assert "assemble again to run it that way" in shown(window.messages)
+    window.do("assemble")
+    assert turning(lambda: window.views_of["cache"].rows != [])
+    assert window.views_of["cache"].saying == ""
 
 
 def test_the_models_and_the_devices_of_a_run(gtk, tmp_path, turning):
@@ -774,24 +849,33 @@ def test_the_models_and_the_devices_of_a_run(gtk, tmp_path, turning):
         # touch of a block is always a miss
         assert said["accesses"] == "1" and said["misses"] == "1"
         assert said["hits"] == "0" and said["hit rate"] == "0.0000"
-        assert made.views_of["blocks"].rows != []
+        # and the grid of it holds the one block the program brought in
+        drawn = made.pictures["cache"].picture
+        assert [part.text for part in drawn.parts].count("0x10010000") == 1
+        assert sum(1 for part in drawn.parts if part.fill == "dirty") == 1
 
         # the pipeline counted the time, and the guesser under it
         counted = {row[0]: row[1] for row in made.views_of["pipeline"].rows}
         assert int(counted["cycles"]) > int(counted["instructions"]) == WHOLE
         assert counted["guesser"].startswith("a table of 16 entries")
-        assert made.views_of["diagram"].rows != []
+        # one row of the diagram to every instruction, five stages to a row
+        drawn = made.pictures["pipeline"].picture
+        assert sum(1 for part in drawn.parts if part.text == "IF") == WHOLE
+        assert sum(1 for part in drawn.parts if part.fill == "execute") == WHOLE
 
-        # the device is attached, at the address a program finds it at
-        assert [row[0] for row in made.views_of["devices"].rows] == ["timer"]
-        assert made.views_of["devices"].rows[0][1] == "0xffff0018"
-        assert "clock" in [row[1] for row in made.views_of["state"].rows]
-        assert "virtual" in made.views_of["state"].rows[0][2]
+        # the device has a page of its own, saying where a program finds it
+        panel = made.panels["device:timer"]
+        assert [row[0] for row in panel.table.rows][:2] == ["where", "size"]
+        assert panel.table.rows[0][1] == "0xffff0018"
+        assert "virtual" in dict(panel.table.rows)["clock"]
+        assert panel.picture is None  # a timer is a time: there is nothing to draw
 
-        # and what the run was made of
+        # and what the run was made of, written out and drawn
         made_of = {row[0]: row[1] for row in made.views_of["counted"].rows}
         assert made_of["instructions"] == str(WHOLE)
         assert int(made_of["branches that went"]) == 2  # the loop turns three times
+        bars = made.pictures["counted"].picture
+        assert [part.text for part in bars.parts if part.text].count("branch") == 1
     finally:
         made.close_up()
 
@@ -831,6 +915,13 @@ def test_settings_of_a_run_that_cannot_be_read_are_said_and_not_thrown(gtk, tmp_
         assert made.settings == runs.Settings()
     finally:
         made.close_up()
+
+
+def _titles(window) -> list[str]:
+    """What the tabs of the lower views say, in order."""
+    notebook = window.views
+    return [notebook.get_tab_label(notebook.get_nth_page(index)).get_text()
+            for index in range(notebook.get_n_pages())]
 
 
 def _row(window, which: str, name: str):

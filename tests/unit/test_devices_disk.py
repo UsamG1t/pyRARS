@@ -61,6 +61,16 @@ def order(machine: Machine, block: int, buffer: int, count: int,
 # ----------------------------------------------------------------- the geometry
 
 
+def test_what_the_disk_looks_like_is_the_block_it_is_at():
+    machine, device = disk()
+    assert device.looks() == {"blocks": 4, "at": 0, "left": 0, "working": False,
+                              "writing": False, "refused": False}
+    order(machine, block=2, buffer=0x10010000, count=2, writing=False)
+    looks = device.looks()
+    assert looks["working"] is True and looks["at"] == 2
+    assert looks["left"] == 2 and looks["writing"] is False
+
+
 def test_the_disk_says_how_large_it_is():
     machine, device = disk(blocks=4, block_size=8)
     assert (get(machine, BLOCKS), get(machine, SIZE)) == (4, 8)

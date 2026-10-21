@@ -28,6 +28,25 @@ def screen(**options) -> tuple[Machine, BitmapDisplay]:
     return machine, device
 
 
+# ------------------------------------------------------- what it looks like
+
+
+def test_what_the_display_looks_like_is_its_units_as_they_are():
+    """`state` is what to read ABOUT the display; `looks` is the picture itself,
+    which is the one thing a table of words cannot say."""
+    # twelve pixels across in units of three is four units across, as RARS counts
+    machine, device = screen(width=12, height=10, unit_width=3, unit_height=5)
+    machine.memory.write(device.base, 4, 0xFF0000)
+    machine.memory.write(device.base + 4, 4, 0x00FF00)
+    looks = device.looks()
+    assert looks["units"][:3] == (0xFF0000, 0x00FF00, 0)
+    assert len(looks["units"]) == 8
+    assert (looks["columns"], looks["rows"]) == (4, 2)
+    assert (looks["unit_width"], looks["unit_height"]) == (3, 5)
+    # a copy, because whoever draws it has a thread of its own
+    assert looks["units"] is not device.frame
+
+
 # ------------------------------------------------------------------- the place
 
 

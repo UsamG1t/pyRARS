@@ -222,6 +222,13 @@ class KeyboardDisplay(Model):
             "delay": f"{self.delay} ({self.technique})",
         }
 
+    def looks(self) -> dict[str, object]:
+        """What the display holds, and how much of it there is: a display is read,
+        so its picture is its text."""
+        return {"text": self.shown(), "columns": self.columns, "rows": self.rows,
+                "queued": len(self.keys), "lost": self.lost,
+                "busy": self.counting}
+
     @property
     def waiting_for_a_key(self) -> bool:
         """Whether the program has read the key typed before."""

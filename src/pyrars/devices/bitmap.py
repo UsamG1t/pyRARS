@@ -106,6 +106,17 @@ class BitmapDisplay(Model):
 
     # --------------------------------------------------------- what a viewer does
 
+    def looks(self) -> dict[str, object]:
+        """The picture itself: every unit as the colour it holds.
+
+        A copy, taken while the thread of the run holds it - whoever draws it has
+        its own thread, and a list that was being written to as it was read would
+        tear.
+        """
+        return {"units": tuple(self.frame), "columns": self.columns,
+                "rows": self.rows, "unit_width": self.unit_width,
+                "unit_height": self.unit_height}
+
     def state(self) -> dict[str, object]:
         painted = sum(1 for word in self.frame if word)
         return {

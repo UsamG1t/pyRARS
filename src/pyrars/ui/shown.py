@@ -111,7 +111,6 @@ def said(problems_of_a_line) -> str:
 
 # ------------------------------------------------------- the views of the machine
 
-from pyrars.ui import meanings  # noqa: E402 - what a device or a model is FOR
 from pyrars.values import value_text  # noqa: E402 - the shapes a value is written in
 
 HERE = "▶"  # the row the machine stands on
@@ -216,45 +215,11 @@ def _place(place) -> str:
 
 # ------------------------------------- the things around the machine, and the models
 
-DEVICES = ("Device", "Where", "Size", "What it is")
-STATE = ("Device", "Name", "Value")
+ONE_STATE = ("Name", "Value")
 CACHES = ("Cache", "Name", "Value")
-BLOCKS = ("Cache", "Set", "Place", "Addresses", "")
 PIPELINE = ("Name", "Value")
-DIAGRAM = ("Address", "Instruction", "IF", "ID", "EX", "MEM", "WB", "Waited")
 COUNTED = ("Name", "Value")
 MEMORY = ("Name", "Address")
-
-
-def devices(seen, base: int = 0) -> tuple[tuple[str, ...], ...]:
-    """What is attached to the machine, and where a program finds it.
-
-    A device that answers no address - the bitmap display watches memory instead -
-    has nowhere to be, and says so rather than showing a number that would be
-    read as an address.
-    """
-    return tuple((one.name,
-                  "no address of its own" if one.offset is None
-                  else f"0x{base + one.offset:08x}",
-                  "" if one.size is None else f"{one.size} bytes",
-                  meanings.of_a_setting(one.name)) for one in seen)
-
-
-def device_state(seen, form: str = "hex") -> tuple[tuple[str, ...], ...]:
-    """What each attached device holds, as the device itself says it.
-
-    A device answers in words of its own making - "virtual (1 ms an instruction)",
-    "0x10010000, 512 by 256 units" - and those are written as they come; a number
-    is written in the format chosen for everything else, and a yes or no as a yes
-    or no, because a device that says `True` says nothing about a bit.
-    """
-    rows = []
-    for one in seen:
-        for name, value in one.state.items():
-            rows.append((one.name, name, _as_it_is(value, form)))
-        if not one.state:
-            rows.append((one.name, "", "says nothing of itself"))
-    return tuple(rows)
 
 
 def _as_it_is(value, form: str = "hex") -> str:
@@ -266,6 +231,38 @@ def _as_it_is(value, form: str = "hex") -> str:
     if isinstance(value, float):
         return f"{value:.4f}"
     return str(value)
+
+
+# The devices whose name is not written as a word.
+TITLES = {"dma": "DMA"}
+
+
+def device_title(name: str) -> str:
+    """What the tab of a device says."""
+    return TITLES.get(name, name.capitalize())
+
+
+def one_state(seen, form: str = "hex", base: int = 0
+              ) -> tuple[tuple[str, ...], ...]:
+    """What ONE device is and holds, for the panel of that device.
+
+    Where it answers and how much room it takes come first, because that is what a
+    program needs of it and the device itself never says; a device that answers no
+    address - the bitmap display watches memory instead - says so rather than
+    showing a number anybody would read as an address. After that come the device's
+    own words: a number in the format chosen for everything else, a yes or no as a
+    yes or no, since a device that says `True` says nothing about a bit, and
+    whatever it says of its own making ("virtual (1 ms an instruction)") as it
+    comes.
+    """
+    if seen is None:
+        return ()
+    rows = [("where", "no address of its own" if seen.offset is None
+             else f"0x{base + seen.offset:08x}")]
+    if seen.size is not None:
+        rows.append(("size", f"{seen.size} bytes"))
+    rows += [(name, _as_it_is(value, form)) for name, value in seen.state.items()]
+    return tuple(rows)
 
 
 def caches(seen, form: str = "hex") -> tuple[tuple[str, ...], ...]:
@@ -287,15 +284,6 @@ def caches(seen, form: str = "hex") -> tuple[tuple[str, ...], ...]:
                   ("written back", cache.writebacks),
                   ("written through", cache.through))]
     return tuple(rows)
-
-
-def cache_blocks(lines, form: str = "hex") -> tuple[tuple[str, ...], ...]:
-    """The blocks the caches are holding. The place of a block in its set is also
-    its age, where a cache replaces by use or by order of arrival: the one at place
-    0 is the one that makes room (the entry of `CacheLine`)."""
-    return tuple((line.side, str(line.set), str(line.place),
-                  f"0x{line.low:08x} - 0x{line.high:08x}",
-                  "written to" if line.dirty else "") for line in lines)
 
 
 def pipeline(seen, guesser=None) -> tuple[tuple[str, ...], ...]:
@@ -321,14 +309,6 @@ def pipeline(seen, guesser=None) -> tuple[tuple[str, ...], ...]:
                  ("guessed rightly", str(guesser.right)),
                  ("how often rightly", f"{guesser.accuracy:.4f}")]
     return tuple(rows)
-
-
-def diagram(rows) -> tuple[tuple[str, ...], ...]:
-    """The diagram: the cycle each of the five stages of each instruction began in,
-    and how long the instruction waited before it could go on."""
-    return tuple((f"0x{row.address:08x}", row.mnemonic,
-                  *(str(cycle) for cycle in row.starts),
-                  str(row.waited) if row.waited else "") for row in rows)
 
 
 def counted(seen) -> tuple[tuple[str, ...], ...]:

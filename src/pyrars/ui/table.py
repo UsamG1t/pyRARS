@@ -78,6 +78,15 @@ class Table(Gtk.Stack):
         self.set_visible_child_name(
             "rows" if rows or not self.otherwise.get_text() else "nothing")
 
+    def says(self, otherwise: str) -> None:
+        """Change what it says when it holds nothing. One table may have nothing in
+        it for more than one reason - a cache nobody asked for, and a cache asked
+        for but not yet given to a machine - and the reason is the whole value of
+        the words."""
+        self.otherwise.set_label(otherwise)
+        self.set_visible_child_name("nothing" if otherwise and not self.rows
+                                    else "rows")
+
     @property
     def saying(self) -> str:
         """What is being shown in place of rows, where anything is."""

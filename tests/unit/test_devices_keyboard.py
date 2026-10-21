@@ -59,6 +59,21 @@ def put(machine: Machine, which: int, value: int) -> None:
 # -------------------------------------------------------------- the keyboard
 
 
+def test_what_the_display_looks_like_is_the_text_it_is_showing():
+    """A display shows CHARACTERS, so the picture of one is its characters."""
+    machine, device = keyboard(rows=4, columns=8, delay=1, queue=2)
+    for letter in "hi":
+        machine.memory.write(MMIO + TRANSMITTER_DATA, 4, ord(letter))
+        tick(device, 2)
+    looks = device.looks()
+    assert looks["text"].startswith("hi")
+    assert (looks["columns"], looks["rows"]) == (8, 4)
+    device.type_key("a")  # it goes straight into the register
+    device.type_key("b")  # this one waits its turn
+    device.type_key("c")  # and this one is lost: the keyboard holds two
+    assert device.looks()["queued"] == 1 and device.looks()["lost"] == 1
+
+
 def test_a_key_typed_waits_until_the_program_reads_it():
     machine, device = keyboard()
     assert device.waiting_for_a_key is True

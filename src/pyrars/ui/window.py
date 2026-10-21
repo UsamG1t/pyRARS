@@ -22,7 +22,8 @@ from pyrars.session.control import (  # noqa: E402
 from pyrars.session import project as projects  # noqa: E402
 from pyrars.session import settings as runs  # noqa: E402
 from pyrars.session.project import Project  # noqa: E402
-from pyrars.ui import actions, shown  # noqa: E402
+from pyrars.ui import actions, devices, drawing, shown  # noqa: E402
+from pyrars.ui.canvas import Canvas  # noqa: E402
 from pyrars.ui.editor import Editor  # noqa: E402
 from pyrars.ui.help_window import HelpWindow  # noqa: E402
 from pyrars.ui.project_window import ProjectWindow  # noqa: E402
@@ -107,16 +108,20 @@ class Window(Adw.ApplicationWindow):
                             "The run is inside no call.\n"
                             "A frame appears for every call it is inside, as far as "
                             "the calling convention lets anyone tell."),
-            "devices": Table(shown.DEVICES, _NOT_ASKED_FOR % "No device is attached"),
-            "state": Table(shown.STATE, "A device says what it holds while it is "
-                                        "attached and a program is open"),
-            "cache": Table(shown.CACHES, _NOT_ASKED_FOR % "No cache is modelled"),
-            "blocks": Table(shown.BLOCKS, "The caches are holding nothing yet"),
-            "pipeline": Table(shown.PIPELINE,
-                              _NOT_ASKED_FOR % "No pipeline is modelled"),
-            "diagram": Table(shown.DIAGRAM, "The pipeline is keeping no diagram"),
-            "counted": Table(shown.COUNTED, _NOT_ASKED_FOR % "The run is not counted"),
+            "cache": Table(shown.CACHES, _NOT_GIVEN % "a cache"),
+            "pipeline": Table(shown.PIPELINE, _NOT_GIVEN % "a pipeline"),
+            "counted": Table(shown.COUNTED, _NOT_GIVEN % "the counting"),
         }
+        # What is DRAWN rather than written out: the grid of a cache, the diagram
+        # of the pipeline, the kinds of instruction a run was made of. A table says
+        # what happened; a picture says what is happening (the architect,
+        # 2026-10-22).
+        self.pictures = {name: Canvas() for name in ("cache", "pipeline",
+                                                     "counted")}
+        # The pages that are only there while they are asked for, and the panels
+        # of the devices, which are built when a device is first attached.
+        self.panels: dict[str, Gtk.Widget] = {}
+        self.pages_now: list[str] = []
         self.console = _telling()
         self.messages = _telling()
         self.set_content(self._built())
@@ -179,11 +184,17 @@ class Window(Adw.ApplicationWindow):
         the queue behind the movement, and the movement is not going to end - so
         the questions are given to the controller to answer with every snapshot it
         sends instead.
+
+        The models are among them, and that is the whole reason to slow a run down
+        with a cache: the grid fills and empties while the program is running, so a
+        program whose two streams of addresses throw each other out of the same set
+        can be WATCHED doing it (the architect, 2026-10-22).
         """
         self.speed = shown.SPEEDS[chooser.get_selected()]
         self.control.speed = self.speed
         self.control.watching = {} if self.speed is None else {
-            REGISTERS: _of_the_registers, PLACES: _of_the_places}
+            REGISTERS: _of_the_registers, PLACES: _of_the_places,
+            MODELS: _of_the_models}
 
     def _formats(self) -> Gtk.Widget:
         """How every value of the machine is written, which is one choice for all
@@ -262,21 +273,63 @@ class Window(Adw.ApplicationWindow):
         for name, title in (("text", "Text"), ("data", "Data"),
                             ("labels", "Labels"), ("frames", "Frames")):
             self.views.append_page(self.views_of[name], Gtk.Label(label=title))
-        # The things around the machine and the models that watch it. Each is two
-        # views of one thing - what it IS above, what it has DONE below - because
-        # a hit rate without the cache that gave it says nothing.
-        for names, title in ((("devices", "state"), "Devices"),
-                             (("cache", "blocks"), "Cache"),
-                             (("pipeline", "diagram"), "Pipeline")):
-            self.views.append_page(
-                _one_above_the_other(self.views_of[names[0]],
-                                     self.views_of[names[1]]),
-                Gtk.Label(label=title))
-        self.views.append_page(self.views_of["counted"], Gtk.Label(label="Counted"))
         self.console_page = self.views.append_page(self._console(),
                                                    Gtk.Label(label="Console"))
         self.views.append_page(_scrolled(self.messages), Gtk.Label(label="Messages"))
+        self._pages_again()
         return self.views
+
+    # ------------------------------------------------- the pages that come and go
+
+    def pages_wanted(self) -> list[str]:
+        """The views that are there only while the run is set up to feed them.
+
+        A page about a thing nobody asked to watch says nothing and takes the room
+        of a page that would: four of them pushed the Console behind a scroll (the
+        architect, 2026-10-22). So the cache, the pipeline, the counting and every
+        device appear when they are asked for in the run window and go when they
+        are not.
+        """
+        wanted = []
+        if self.settings.cache is not None or self.settings.instructions is not None:
+            wanted.append("cache")
+        if self.settings.pipeline is not None:
+            wanted.append("pipeline")
+        if self.settings.statistics:
+            wanted.append("counted")
+        return wanted + [f"{_DEVICE}{name}" for name in sorted(self.settings.devices)]
+
+    def _pages_again(self) -> None:
+        """Put the pages that come and go where they belong.
+
+        They are all at the END of the notebook, after the pages that are always
+        there, so that nothing a person is looking at moves about when a setting
+        changes; and the page being looked at is kept where it can be.
+        """
+        wanted = self.pages_wanted()
+        if wanted == self.pages_now:
+            return
+        looking = self.views.get_current_page()
+        for _ in self.pages_now:
+            self.views.remove_page(-1)
+        for name in wanted:
+            self.views.append_page(self._page_of(name),
+                                   Gtk.Label(label=_titled(name)))
+        self.pages_now = wanted
+        self.views.set_current_page(min(max(looking, 0),
+                                        self.views.get_n_pages() - 1))
+
+    def _page_of(self, name: str) -> Gtk.Widget:
+        """The page of one of them, built the first time it is wanted and kept: a
+        panel that is taken off the notebook and put back must come back holding
+        what it held."""
+        if name not in self.panels:
+            if name.startswith(_DEVICE):
+                self.panels[name] = devices.Panel(name[len(_DEVICE):])
+            else:
+                self.panels[name] = _side_by_side(
+                    _scrolled(self.pictures[name]), self.views_of[name])
+        return self.panels[name]
 
     def _console(self) -> Gtk.Widget:
         """What the program writes, and the line it is waiting for.
@@ -428,6 +481,7 @@ class Window(Adw.ApplicationWindow):
         except OSError as problem:
             self._said(f"the settings of the run could not be kept: "
                        f"{problem.strerror or problem}")
+        self._pages_again()
         self._said(f"the run: {shown.run_called(settings)}{kept}")
         if self.session_is_open:
             self._said("assemble again to run it that way")
@@ -636,17 +690,30 @@ class Window(Adw.ApplicationWindow):
         self.views_of["control"].show(shown.control(values["control"], self.format))
 
     def _models_shown(self, values: dict) -> None:
-        """What is attached to the machine, and what the models counted."""
-        self.views_of["devices"].show(shown.devices(values["devices"],
-                                                    values["base"]))
-        self.views_of["state"].show(shown.device_state(values["devices"],
-                                                       self.format))
+        """What is attached to the machine, and what the models counted.
+
+        A page may be up for something the MACHINE has not got: the settings are
+        given to it at an Assemble, so a cache switched on while a program is
+        already open is a page with nothing in it until the program is assembled
+        again. That is what it says, in those words, rather than looking broken.
+        """
         self.views_of["cache"].show(shown.caches(values["caches"]))
-        self.views_of["blocks"].show(shown.cache_blocks(values["blocks"]))
+        self.pictures["cache"].show(
+            drawing.cache_picture(values["caches"], values["blocks"]))
         self.views_of["pipeline"].show(shown.pipeline(values["pipeline"],
                                                       values["guesser"]))
-        self.views_of["diagram"].show(shown.diagram(values["diagram"]))
+        self.pictures["pipeline"].show(drawing.pipeline_picture(values["diagram"]))
         self.views_of["counted"].show(shown.counted(values["counted"]))
+        self.pictures["counted"].show(drawing.bars_picture(values["counted"]))
+        for name, wanted in (("cache", values["caches"]),
+                             ("pipeline", values["pipeline"]),
+                             ("counted", values["counted"])):
+            self.views_of[name].says("" if wanted else _NOT_GIVEN % _THINGS[name])
+        attached = {seen.name: seen for seen in values["devices"]}
+        for name in self.pages_now:
+            if name.startswith(_DEVICE):
+                self.panels[name].show(attached.get(name[len(_DEVICE):]),
+                                       self.format, values["base"])
 
     def _places_shown(self, values: dict) -> None:
         self.views_of["data"].show(shown.data(values["data"], self.format))
@@ -721,10 +788,24 @@ REGISTERS = "the registers"
 PLACES = "the places"
 MODELS = "the models"
 
-# What a view says when the thing it shows was never asked for. The run window is
-# where it IS asked for, and a person looking at an empty table wants to know that
-# much (the lesson of the empty frames, 2026-10-21).
-_NOT_ASKED_FOR = '%s.\nThe run window ("The run…") is where one is asked for'
+# What a view of a model says while the MACHINE has not got that model. The pages
+# come and go with the settings, so a page that is there at all was asked for; what
+# it can still be waiting for is an Assemble, because that is when the machine is
+# given the models (the lesson of the empty frames, 2026-10-21, and of a cache
+# that showed nothing, 2026-10-22).
+_NOT_GIVEN = ("The program has not been assembled since %s was asked for.\n"
+              "Assemble it again, and this is filled as the run goes on.")
+_THINGS = {"cache": "a cache", "pipeline": "a pipeline", "counted": "the counting"}
+
+# A page of one device, by the device's own name.
+_DEVICE = "device:"
+
+
+def _titled(name: str) -> str:
+    """What the tab of a page that comes and goes says."""
+    if name.startswith(_DEVICE):
+        return shown.device_title(name[len(_DEVICE):])
+    return name.capitalize()
 
 
 def _of_the_registers(session) -> dict:
@@ -802,14 +883,22 @@ def _scrolled(child: Gtk.Widget) -> Gtk.Widget:
     return window
 
 
-def _one_above_the_other(upper: Gtk.Widget, lower: Gtk.Widget) -> Gtk.Widget:
-    """Two views of one thing, the lower one movable: what the thing IS above and
-    what it has DONE below."""
-    pane = Gtk.Paned(orientation=Gtk.Orientation.VERTICAL)
-    pane.set_start_child(upper)
-    pane.set_end_child(lower)
-    pane.set_position(220)
+def _side_by_side(left: Gtk.Widget, right: Gtk.Widget) -> Gtk.Widget:
+    """Two views of one thing, beside each other: what the thing IS on the left and
+    what it has DONE on the right.
+
+    Beside and not above (the architect, 2026-10-22): the views are the lower third
+    of the window, so the room there is wide and shallow, while a picture and a
+    table of names and values are both NARROW AND LONG. Side by side each gets its
+    whole height; one above the other each got a third of a third of the window,
+    and the one below was a table nobody knew was there.
+    """
+    pane = Gtk.Paned(orientation=Gtk.Orientation.HORIZONTAL)
+    pane.set_start_child(left)
+    pane.set_end_child(right)
+    pane.set_position(520)
     pane.set_resize_start_child(True)
+    pane.set_resize_end_child(True)
     return pane
 
 

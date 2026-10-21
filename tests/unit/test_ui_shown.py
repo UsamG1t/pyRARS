@@ -80,33 +80,33 @@ def _setting(name, value):
     return Setting(name, value)
 
 
-def test_what_is_attached_and_where_a_program_finds_it():
+def test_what_one_device_is_and_holds():
+    """Where it answers comes first: that is what a program needs of a device, and
+    the device itself never says it."""
     from pyrars.session.debug import DeviceSeen
-    from pyrars.ui.meanings import of_a_setting
-    from pyrars.ui.shown import devices
+    from pyrars.ui.shown import one_state
 
-    seen = [DeviceSeen("timer", 0x18, 16, {}),
-            DeviceSeen("bitmap", None, None, {})]
-    rows = devices(seen, 0xFFFF0000)
-    assert rows[0] == ("timer", "0xffff0018", "16 bytes", of_a_setting("timer"))
-    # a device that answers no address has nowhere to be, and says so rather than
-    # showing a number anybody would read as an address
-    assert rows[1][1:3] == ("no address of its own", "")
+    seen = DeviceSeen("timer", 0x18, 16, {"clock": "virtual (1 ms)", "time": 256,
+                                          "armed": False})
+    rows = one_state(seen, base=0xFFFF0000)
+    assert rows[0] == ("where", "0xffff0018")
+    assert rows[1] == ("size", "16 bytes")
+    assert rows[2] == ("clock", "virtual (1 ms)")  # its own words, as they come
+    assert rows[3] == ("time", "0x00000100")  # a number, in the format chosen
+    assert rows[4] == ("armed", "no")  # and never "False"
+    assert one_state(seen, "dec", 0xFFFF0000)[3] == ("time", "256")
+    assert one_state(None) == ()
 
 
-def test_what_a_device_holds_in_the_words_of_the_device():
+def test_a_device_that_answers_no_address_of_its_own():
+    """The bitmap display watches memory instead; a number there would be read as
+    an address it answers at, and it answers at none."""
     from pyrars.session.debug import DeviceSeen
-    from pyrars.ui.shown import device_state
+    from pyrars.ui.shown import one_state
 
-    seen = [DeviceSeen("timer", 0x18, 16, {"clock": "virtual (1 ms)", "time": 256,
-                                           "armed": False}),
-            DeviceSeen("halt", 0x28, 4, {})]
-    rows = device_state(seen)
-    assert rows[0] == ("timer", "clock", "virtual (1 ms)")
-    assert rows[1] == ("timer", "time", "0x00000100")  # a number, in the format
-    assert rows[2] == ("timer", "armed", "no")  # and never "False"
-    assert device_state(seen, "dec")[1] == ("timer", "time", "256")
-    assert rows[3] == ("halt", "", "says nothing of itself")
+    rows = one_state(DeviceSeen("bitmap", None, None, {"painted": "0 of 4"}),
+                     base=0xFFFF0000)
+    assert rows == (("where", "no address of its own"), ("painted", "0 of 4"))
 
 
 def test_how_a_cache_was_built_and_how_it_has_fared():
@@ -122,17 +122,6 @@ def test_how_a_cache_was_built_and_how_it_has_fared():
     assert ("cache", "accesses", "10") in rows
     assert ("cache", "hit rate", "0.7000") in rows
     assert ("cache", "written through", "0") in rows
-
-
-def test_the_blocks_the_caches_are_holding():
-    from pyrars.session.debug import CacheLine
-    from pyrars.ui.shown import cache_blocks
-
-    lines = [CacheLine("data", 2, 0, 5, 0x10010000, 0x1001000F, True),
-             CacheLine("data", 2, 1, 6, 0x10010010, 0x1001001F, False)]
-    assert cache_blocks(lines) == (
-        ("data", "2", "0", "0x10010000 - 0x1001000f", "written to"),
-        ("data", "2", "1", "0x10010010 - 0x1001001f", ""))
 
 
 def test_what_the_pipeline_counted_with_the_guesser_under_it():
@@ -153,17 +142,6 @@ def test_what_the_pipeline_counted_with_the_guesser_under_it():
     assert rows["guesser entries"] == "4"
     assert rows["how often rightly"] == "0.2500"
     assert pipeline(None) == ()  # nobody asked for one
-
-
-def test_the_diagram_of_the_pipeline():
-    from pyrars.session.debug import StageSeen
-    from pyrars.ui.shown import DIAGRAM, diagram
-
-    rows = diagram([StageSeen(0x400000, "addi", (0, 1, 2, 3, 4), 1, 0),
-                    StageSeen(0x400004, "lw", (1, 2, 3, 4, 6), 1, 1)])
-    assert rows[0] == ("0x00400000", "addi", "0", "1", "2", "3", "4", "")
-    assert rows[1][-1] == "1"  # what it waited for, where it waited at all
-    assert all(len(row) == len(DIAGRAM) for row in rows)
 
 
 def test_what_the_run_was_made_of():
