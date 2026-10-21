@@ -96,8 +96,10 @@ def shown(view) -> str:
 def test_a_window_is_built(window):
     assert window.get_title() == "main.s - pyRARS"  # the file it was opened on
     assert window.get_content() is not None
-    # the ten of the run, and the two of the files that have a button of their own
-    assert len(window.buttons) == 12
+    # the eleven of the run - the cycle of the pipeline among them, which is
+    # hidden until a pipeline is modelled - and the two of the files
+    assert len(window.buttons) == 13
+    assert not window.buttons["cycle"].get_visible()
 
 
 def test_the_program_is_open_in_the_editor_before_anything_is_assembled(window):
@@ -858,10 +860,13 @@ def test_the_models_and_the_devices_of_a_run(gtk, tmp_path, turning):
         counted = {row[0]: row[1] for row in made.views_of["pipeline"].rows}
         assert int(counted["cycles"]) > int(counted["instructions"]) == WHOLE
         assert counted["guesser"].startswith("a table of 16 entries")
-        # one row of the diagram to every instruction, five stages to a row
+        # a row of the diagram to every instruction, and five stages to a row;
+        # "IF" is written once, over the column
         drawn = made.pictures["pipeline"].picture
-        assert sum(1 for part in drawn.parts if part.text == "IF") == WHOLE
-        assert sum(1 for part in drawn.parts if part.fill == "execute") == WHOLE
+        assert sum(1 for part in drawn.parts if part.text == "IF") == 1
+        # the name of the column wears the colour too, so it is not a cell
+        assert sum(1 for part in drawn.parts
+                   if part.fill == "execute" and part.text != "EX") == WHOLE
 
         # the device has a page of its own, saying where a program finds it
         panel = made.panels["device:timer"]
@@ -876,6 +881,62 @@ def test_the_models_and_the_devices_of_a_run(gtk, tmp_path, turning):
         assert int(made_of["branches that went"]) == 2  # the loop turns three times
         bars = made.pictures["counted"].picture
         assert [part.text for part in bars.parts if part.text].count("branch") == 1
+    finally:
+        made.close_up()
+
+
+def test_the_cycle_of_the_pipeline_arrives_with_the_pipeline(window, turning):
+    """The button is not there at all until a pipeline is being modelled: a cycle
+    of a model nobody asked for is no cycle, and a button that can never be
+    pressed is a button in the way (the architect, 2026-10-23)."""
+    from pyrars.session import settings as runs
+
+    window.do("assemble")
+    assert turning(lambda: window.state == "standing")
+    assert not window.buttons["cycle"].get_visible()
+    assert "cycle" not in window.allowed()  # and a key would reach nothing either
+    window.the_run_is(runs.Settings(pipeline={}))
+    assert window.buttons["cycle"].get_visible()
+    assert "cycle" in window.allowed()
+    assert "Pipeline" in _titles(window)
+
+
+def test_the_cycles_of_the_pipeline_are_walked_in_the_window(gtk, tmp_path, turning):
+    """Six steps of the machine and nine cycles of the model are the same five
+    instructions; the frame of the cycle says which of them are in flight."""
+    from pyrars.session import settings as runs
+    from pyrars.ui.window import Window
+
+    (tmp_path / "main.s").write_text(
+        ".globl main\n.text\nmain: li a1, 1\n      li a2, 2\n      li a3, 3\n"
+        "      li a4, 4\n      add a5, a1, a2\n")
+    made = Window(files=(str(tmp_path / "main.s"),), cache=str(tmp_path / "cache"),
+                  settings=runs.Settings(pipeline={}))
+    try:
+        made.do("assemble")
+        assert turning(lambda: made.state == "standing")
+        assert made.buttons["cycle"].get_visible()
+        def said() -> str:
+            """What the diagram says of the cycle it is showing."""
+            return next((part.text for part in
+                         made.pictures["pipeline"].picture.parts
+                         if part.text.startswith("cycle ")), "")
+
+        made.do("cycle")
+        assert turning(lambda: said() == "cycle 0 of 5")
+        framed = [part for part in made.pictures["pipeline"].picture.parts
+                  if part.edge == "lit"]
+        assert len(framed) == 1  # one instruction, in the fetch, and nothing else
+        for expected in range(1, 5):
+            made.do("cycle")
+            assert turning(lambda: said().startswith(f"cycle {expected} "))
+        # the pipeline is full: five instructions, each in a stage of its own
+        assert said() == "cycle 4 of 9"
+        assert len([part for part in made.pictures["pipeline"].picture.parts
+                    if part.edge == "lit"]) == 5
+        # and the machine was carried only as far as it had to be
+        counted = {row[0]: row[1] for row in made.views_of["pipeline"].rows}
+        assert counted["instructions"] == "5"
     finally:
         made.close_up()
 

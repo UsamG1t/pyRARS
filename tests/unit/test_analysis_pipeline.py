@@ -56,6 +56,32 @@ NOP = word("addi", rd=9, rs1=0, imm=1)
 # ------------------------------------------------------------------ the five stages
 
 
+def test_a_machine_that_does_not_overlap_at_all():
+    """Not a hindrance of a pipeline but the absence of one: every instruction
+    costs its whole five cycles, which is the comparison the whole idea of a
+    pipeline rests on (the architect, 2026-10-23)."""
+    pipeline = timed(NOP, NOP, NOP, NOP, NOP, settings=Settings(overlap=False))
+    assert pipeline.instructions == 5
+    assert pipeline.cycles == 25  # five instructions of five cycles, none shared
+    assert pipeline.cpi == 5.0
+    assert pipeline.lost == 0  # it waited for nothing: there was nothing to wait for
+    assert starts(pipeline) == [(0, 1, 2, 3, 4), (5, 6, 7, 8, 9),
+                                (10, 11, 12, 13, 14), (15, 16, 17, 18, 19),
+                                (20, 21, 22, 23, 24)]
+    # and the same five instructions on a machine that does overlap
+    assert timed(NOP, NOP, NOP, NOP, NOP).cycles == 9
+
+
+def test_the_cycle_the_next_instruction_would_be_fetched_in():
+    """Whoever walks the diagram a cycle at a time needs it: what is in the
+    pipeline at a cycle is wholly known only once something has been fetched
+    after it."""
+    assert Pipeline().fetching == 0
+    assert timed(NOP).fetching == 1  # one instruction fetched to a cycle
+    assert timed(NOP, NOP, NOP).fetching == 3
+    assert timed(NOP, NOP, settings=Settings(overlap=False)).fetching == 10
+
+
 def test_one_instruction_takes_the_five_stages():
     pipeline = timed(NOP)
     assert pipeline.cycles == 5

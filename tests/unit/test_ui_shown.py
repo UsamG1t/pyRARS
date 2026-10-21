@@ -128,8 +128,8 @@ def test_what_the_pipeline_counted_with_the_guesser_under_it():
     from pyrars.session.debug import GuesserSeen, PipelineSeen
     from pyrars.ui.shown import pipeline
 
-    seen = PipelineSeen((_setting("forwarding", True),), cycles=48,
-                        instructions=31, cpi=48 / 31, lost=10,
+    seen = PipelineSeen(cycle=-1, settings=(_setting("forwarding", True),),
+                        cycles=48, instructions=31, cpi=48 / 31, lost=10,
                         stalls=(_setting("branch", 6), _setting("load", 4)),
                         branches=4, wrong=3)
     guesser = GuesserSeen("a table of 4 entries", (_setting("entries", 4),),

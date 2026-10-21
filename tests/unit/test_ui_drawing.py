@@ -10,8 +10,9 @@ which segments of a display are lit.
 from pyrars.session.debug import (
     CacheLine, CacheSeen, Setting, StageSeen, StatisticsSeen)
 from pyrars.ui.drawing import (
-    BLOCK, COLOURS, CYCLE, SEGMENT, SET, STAGES, STEP, WHERE, bars_picture,
-    blocks_picture, cache_picture, copying_picture, lab_picture, pipeline_picture)
+    BLOCK, COLOURS, INITIALS, SEGMENT, SET, STAGE, STAGES, WHERE, bars_picture,
+    blocks_picture, cache_picture, copying_picture, lab_picture, pipeline_picture,
+    spans)
 
 
 def cache(side="cache", sets=4, ways=1, accesses=0, hits=0, misses=0, rate=0.0):
@@ -81,37 +82,84 @@ def test_a_cache_nobody_asked_for_is_no_picture_at_all():
 # --------------------------------------------------------------- the pipeline
 
 
-def test_the_diagram_is_a_stage_to_a_cell():
+def test_the_diagram_is_a_grid_of_the_five_stages():
+    """A column to a stage and a row to an instruction, with the CYCLE written in
+    every cell: the stages stand under one another, and what happens at the same
+    time reads as a diagonal of equal numbers."""
     rows = [StageSeen(0x400000, "addi", (0, 1, 2, 3, 4), 1, 0),
             StageSeen(0x400004, "lw", (1, 2, 3, 4, 5), 1, 0)]
     drawn = pipeline_picture(rows)
-    assert len(boxes(drawn)) == 10  # five stages to each of two instructions
-    fetches = [part for part in boxes(drawn) if part.fill == "fetch"]
-    # one cycle along and one row down: the diagonal anybody reads a diagram by
-    assert fetches[1].x == fetches[0].x + CYCLE
-    assert fetches[1].y == fetches[0].y + STEP
-    assert all(part.fill in STAGES for part in boxes(drawn))
+    cells = boxes(drawn)
+    assert len(cells) == 10 + 5  # five stages to each row, and the five names
+    named = [part for part in cells if part.text in INITIALS]
+    held = [part for part in cells if part not in named]
+    assert [part.text for part in named] == ["IF", "ID", "EX", "ME", "WB"]
+    assert all(part.y == named[0].y for part in named)  # the names in one line
+    assert [part.x for part in named] == [WHERE + one * STAGE[0]
+                                          for one in range(5)]
+    # every name wears the colour of its own column, so a column is read by its
+    # colour as well as by where it is (the architect, 2026-10-23)
+    assert [part.fill for part in named] == list(STAGES)
+    first = [part for part in held if part.fill == "fetch"]
+    assert first[0].x == first[1].x == WHERE  # a stage keeps its column
+    assert first[1].y == first[0].y + STAGE[1]  # a row to an instruction
+    # and the five stages stand in five columns, in the order a machine does them
+    assert [part.x for part in held][:5] == [WHERE + one * STAGE[0]
+                                             for one in range(5)]
+    assert [part.text for part in held if part.fill == "fetch"] == ["0", "1"]
+    assert [part.text for part in held if part.fill == "write"] == ["4", "5"]
     assert "0x00400004  lw" in words(drawn)
+    assert all(part.fill in STAGES for part in cells)
 
 
-def test_a_stage_that_held_an_instruction_longer_is_a_wider_cell():
+def test_a_stage_that_held_an_instruction_longer_says_so_in_its_cell():
+    """The waiting is in the picture as well: a stage holds its instruction until
+    the next takes it, so `4-7` is four cycles of being stuck."""
     rows = [StageSeen(0x400000, "div", (0, 1, 2, 6, 7), 4, 0)]
     drawn = pipeline_picture(rows)
-    held = [part for part in boxes(drawn) if part.fill == "execute"][0]
-    assert held.width == CYCLE * 4 - 2.0
-    memory = [part for part in boxes(drawn) if part.fill == "memory"][0]
-    assert memory.x == WHERE + 6 * CYCLE  # and what follows it waited
+    said = {part.fill: part.text for part in boxes(drawn) if part.fill in STAGES}
+    assert said["execute"] == "2-5"  # it had EX from 2 until memory took it at 6
+    assert said["memory"] == "6" and said["write"] == "7"
+    assert spans(rows[0]) == ((0, 0), (1, 1), (2, 5), (6, 6), (7, 7))
 
 
-def test_the_cycles_are_numbered_along_the_top():
-    rows = [StageSeen(0x400000 + 4 * one, "addi", (one, one + 1, one + 2, one + 3,
-                                                   one + 4), 1, 0)
-            for one in range(12)]
+def test_the_cycle_being_looked_at_is_framed_wherever_it_is():
+    """Which is the diagonal: at cycle 2 the first instruction is computing, the
+    second is decoding and the third is being fetched."""
+    rows = [StageSeen(0x400000 + 4 * one, "addi",
+                      (one, one + 1, one + 2, one + 3, one + 4), 1, 0)
+            for one in range(4)]
+    drawn = pipeline_picture(rows, cycle=2)
+    framed = [part for part in drawn.parts if part.edge == "lit"]
+    assert len(framed) == 3
+    assert all(part.line > 1.0 for part in framed)  # a frame is drawn to be seen
+    # down and to the left: EX of the first, ID of the second, IF of the third
+    # a frame sits one pixel outside the cell it is round
+    assert [part.x for part in framed] == [WHERE + 2 * STAGE[0] - 1.0,
+                                           WHERE + STAGE[0] - 1.0, WHERE - 1.0]
+    assert [part.y for part in framed] == sorted(part.y for part in framed)
+    assert "cycle 2 of 8" in words(drawn)
+
+
+def test_a_stage_that_is_stuck_is_framed_for_as_long_as_it_holds():
+    """A frame is round what the machine HAS IN HAND in that cycle, not round what
+    began in it: a stage stuck for four cycles is in hand for all four."""
+    rows = [StageSeen(0x400000, "div", (0, 1, 2, 6, 7), 4, 0)]
+    for cycle in (2, 3, 4, 5):
+        framed = [part for part in pipeline_picture(rows, cycle).parts
+                  if part.edge == "lit"]
+        assert len(framed) == 1, cycle
+        # the EX column, still (a frame sits a pixel outside its cell)
+        assert framed[0].x == WHERE + 2 * STAGE[0] - 1.0, cycle
+    assert not [part for part in pipeline_picture(rows, 8).parts
+                if part.edge == "lit"]  # and nothing is in hand after it is done
+
+
+def test_a_diagram_nobody_is_walking_has_no_frame_and_no_cycle():
+    rows = [StageSeen(0x400000, "addi", (0, 1, 2, 3, 4), 1, 0)]
     drawn = pipeline_picture(rows)
-    numbered = [part for part in drawn.parts
-                if part.y == 0.0 and part.text.isdigit()]
-    assert [part.text for part in numbered] == ["0", "5", "10", "15"]
-    assert drawn.width == WHERE + 16 * CYCLE  # the last stage of the last row
+    assert not [part for part in drawn.parts if part.edge == "lit"]
+    assert not [one for one in words(drawn) if one.startswith("cycle ")]
 
 
 def test_a_pipeline_that_kept_no_diagram():

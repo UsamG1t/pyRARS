@@ -20,6 +20,22 @@ def test_nothing_but_assembling_before_a_program_is_opened():
 def test_what_can_be_done_while_the_machine_stands_still():
     assert possible(STANDING) == {"assemble", "continue", "until", "step", "over",
                                   "finish", "restart"}
+    assert possible(STANDING, pipeline=True) == {
+        "assemble", "continue", "until", "step", "over", "finish", "restart",
+        "cycle"}
+
+
+def test_a_cycle_of_the_pipeline_needs_a_pipeline():
+    """A cycle of a model nobody asked for is no cycle at all, so the action is
+    not there - and the window does not even show its button."""
+    assert "cycle" not in possible(STANDING)
+    assert "cycle" in possible(STANDING, pipeline=True)
+    assert "cycle" not in possible(RUNNING, pipeline=True)  # one thing at a time
+    # but a run that is OVER has cycles left to walk: the pipeline drains for four
+    # cycles after the last instruction was fetched, and that is the half of the
+    # picture nobody ever sees otherwise
+    assert "cycle" in possible(ENDED, pipeline=True)
+    assert BY_NAME["cycle"].keys == "<Shift>F7"  # a smaller thing than a step
 
 
 def test_only_stopping_while_the_machine_is_going():
@@ -31,6 +47,7 @@ def test_only_stopping_while_the_machine_is_going():
 
 def test_what_is_left_when_the_run_is_over():
     assert possible(ENDED) == {"assemble", "restart"}
+    assert possible(ENDED, pipeline=True) == {"assemble", "restart", "cycle"}
 
 
 def test_a_program_waiting_for_a_line_can_only_be_ended():

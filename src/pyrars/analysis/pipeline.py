@@ -28,6 +28,12 @@ machine wait:
     default is two ports, which is what a machine with a cache of its own for the
     instructions has, and what the drawings in the books assume.
 
+A machine may also be told NOT to overlap at all (`overlap=False`): then nothing is
+fetched until the instruction before it has been written back, and every
+instruction costs its whole five cycles. That is not a hindrance of a pipeline but
+the absence of one, and it is here because it is the comparison the whole idea
+rests on - the same program, five cycles an instruction against one.
+
 A branch is guessed at by one of the guessers of `analysis/predictors.py` - by
 default the one that never expects a branch to be taken. The run itself says where
 the branch went, so the model knows whether the guess was right; a wrong one throws
@@ -40,9 +46,10 @@ What comes out: the cycles the run would have taken, the instructions carried ou
 CPI, and the cycles lost by cause - so that "it waited 300 cycles for values and
 80 for wrong guesses" can be said. Where one event is two causes at once - a long
 instruction both holds its stage and withholds its value - the wait is blamed on
-the value, since that is the thing the instruction behind it was waiting for. The diagram of what happened in which cycle is
-kept for the first instructions only (a number given with the settings), because a
-long run must not eat the memory.
+the value, since that is the thing the instruction behind it was waiting for.
+
+The diagram of what happened in which cycle is kept for the first instructions only
+(a number given with the settings), because a long run must not eat the memory.
 
 The model is passive (INV-P) and is handed the records of the turns of the loop.
 """
@@ -78,6 +85,11 @@ class Settings:
 
     forwarding: bool = True  # a result may be used before it is written back
     one_port: bool = False  # the fetch and the reach into memory share a port
+    # Whether an instruction may begin before the one before it has finished -
+    # which is what a pipeline IS. Turned off, the same run is timed on a machine
+    # that carries out one instruction at a time, five cycles to each of them: the
+    # comparison that says what a pipeline is worth (the architect, 2026-10-23).
+    overlap: bool = True
     penalty: int = 2  # cycles thrown away by a wrong guess, settled in EX
     trap_penalty: int = 2  # and by an instruction that could not be carried out
     latency: dict[Kind, int] = field(default_factory=dict)  # EX cycles, 1 where unsaid
@@ -142,7 +154,7 @@ class Pipeline:
         settings = self.settings
         ex_cycles = settings.cycles_of(which)
 
-        fetch = max(self._free["IF"], self._fetch_from)
+        fetch = self.fetching
         if self._busy_at(fetch):  # memory is busy with another instruction
             self.stalls[PORT] += 1
             fetch += 1
@@ -176,6 +188,24 @@ class Pipeline:
     def cpi(self) -> float:
         """Cycles to an instruction; nothing of nothing is zero."""
         return self.cycles / self.instructions if self.instructions else 0.0
+
+    @property
+    def fetching(self) -> int:
+        """The cycle in which the next instruction would be fetched.
+
+        It is where the timing of every instruction begins, and whoever walks the
+        diagram a cycle at a time needs it as well: what is in the pipeline at a
+        cycle is wholly known only once an instruction has been fetched AFTER that
+        cycle, since everything in flight there was fetched before it.
+
+        A machine that does not overlap fetches nothing until the instruction
+        before has written back, which is the one thing that makes it not a
+        pipeline.
+        """
+        soonest = max(self._free["IF"], self._fetch_from)
+        if not self.settings.overlap:
+            return max(soonest, self._free["WB"])
+        return soonest
 
     @property
     def lost(self) -> int:

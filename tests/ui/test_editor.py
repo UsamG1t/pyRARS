@@ -356,12 +356,20 @@ def test_a_letter_typed_reaches_the_completion_and_the_window_lives(editor, file
     crashes GTK, because the callback it hands in cannot be called back from here,
     and a test that only called `offered` never went near the handing over. A
     segfault takes the whole test process with it, which is as loud as a failure
-    can be.
+    can be, and the old code was put back underneath this test to be sure of it.
+
+    It can only be done where the screen gives the window the keyboard FOCUS: GTK
+    asks a provider for nothing while the view has not got it, and a display with
+    nothing managing its windows may give it to nobody. So this one says that and
+    steps aside rather than passing for the wrong reason.
     """
     showing(editor)
     page = editor.open(file).get_child()
     page.view.grab_focus()
-    assert turning(lambda: page.view.has_focus(), 2.0)
+    if not turning(lambda: page.view.has_focus(), 2.0):
+        pytest.skip("the screen would not give the window the keyboard focus, and "
+                    "GTK asks a completion provider for nothing while the view "
+                    "has not got it")
     for letter in "\n        ad":
         page.buffer.insert_at_cursor(letter)
         assert turning(lambda: True, 0.2)  # let GTK ask, as it does while typing

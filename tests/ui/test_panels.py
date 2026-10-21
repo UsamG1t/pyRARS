@@ -68,6 +68,55 @@ def test_a_box_of_a_picture_lands_where_the_picture_put_it(gtk):
     assert pixel(1, 1) == (0, 0, 0)  # and nothing is painted in the margin
 
 
+def test_a_box_with_no_colour_of_its_own_paints_nothing(gtk):
+    """And leaves nothing behind for the next box either.
+
+    A rectangle put in the path of cairo and never painted is handed to whatever
+    is painted NEXT: the row of names of the pipeline, which has a box and no
+    colour, came out in the colour of the row under it and over its own words (the
+    architect, 2026-10-23).
+    """
+    from pyrars.ui.canvas import MARGIN, Canvas
+    from pyrars.ui.drawing import Part, Picture
+
+    made = Canvas()
+    made.show(Picture(80.0, 80.0, (
+        Part(0.0, 0.0, 20.0, 20.0, text="here"),  # a box with no colour at all
+        Part(0.0, 40.0, 20.0, 20.0, fill="lit"))))  # and one with a colour
+    surface = painted(made, 100, 100)
+    held, stride = surface.get_data(), surface.get_stride()
+
+    def pixel(x: int, y: int) -> tuple[int, ...]:
+        at = y * stride + 4 * x
+        return tuple(held[at:at + 3])
+
+    assert pixel(int(MARGIN) + 2, int(MARGIN) + 18) == (0, 0, 0)  # nothing painted
+    assert pixel(int(MARGIN) + 2, int(MARGIN) + 42) != (0, 0, 0)  # and that one is
+
+
+def test_words_on_a_colour_of_the_data_are_dark_whatever_the_theme(gtk):
+    """Every fill of a picture is a pale one, so the words on it are ink: the
+    theme's own colour would be white on pale in the dark."""
+    from pyrars.ui.canvas import Canvas
+    from pyrars.ui.drawing import COLOURS, Part, Picture
+
+    made = Canvas()
+    made.show(Picture(60.0, 30.0, (Part(0.0, 0.0, 50.0, 24.0, fill="empty",
+                                        text="IF", size=10.0),)))
+    surface = painted(made, 80, 60)
+    held, stride = surface.get_data(), surface.get_stride()
+    ink = tuple(round(one * 255) for one in reversed(COLOURS["ink"]))
+    pale = tuple(round(one * 255) for one in reversed(COLOURS["empty"]))
+    seen = {tuple(held[y * stride + 4 * x:y * stride + 4 * x + 3])
+            for y in range(6, 28) for x in range(6, 54)}
+
+    def near(colour, wanted, allowed: int = 24) -> bool:
+        return max(abs(one - other) for one, other in zip(colour, wanted)) <= allowed
+
+    assert any(near(colour, pale, 2) for colour in seen)  # the cell
+    assert any(near(colour, ink) for colour in seen)  # the letters on it, in ink
+
+
 def test_every_picture_the_project_makes_can_be_painted(gtk):
     """One test for all of them: a colour nobody has, or a word GTK cannot lay
     out, would otherwise show up in a draw handler, where nothing is reported."""

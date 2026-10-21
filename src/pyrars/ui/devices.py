@@ -8,8 +8,8 @@ Not every device has a picture, and one is not invented for those that have not:
 timer is a time and a time it was asked for, a halt register is the word last
 written to it, and a drawing of a number tells nobody anything that the number
 does not. A device with a picture gets it BESIDE its table - the bitmap display its units,
-the keyboard and display the text it is showing, the digital lab its segments and
-its keys, the disk its blocks, the controller of direct access how far it has got.
+the keyboard and display the text it shows, the digital lab its segments and its
+keys, the disk its blocks, the controller of direct access how far it has got.
 Beside, because the room the views have is wide and shallow while a picture and a
 table of names and values are both narrow and long (the architect, 2026-10-22).
 

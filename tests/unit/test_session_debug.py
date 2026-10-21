@@ -678,6 +678,64 @@ def test_what_the_pipeline_counted(tmp_path):
     assert seen.branches == 4 and 0 < seen.wrong < seen.branches
 
 
+def test_the_cycles_of_the_model_are_walked_one_at_a_time(tmp_path):
+    """A cycle is no step of the machine: the model times a run that has already
+    happened, so walking it on means carrying the machine as far as it must go to
+    know what is in flight - and no further."""
+    s = session(SUM, tmp_path, pipeline=Pipeline(PipelineSettings()))
+    assert s.cycle_now == -1  # nobody has looked at a cycle yet
+    first = s.cycle_on()
+    assert first.now == 0
+    assert first.stepped == 1  # one instruction to know the first cycle
+    assert first.cycles == 5 and not first.ended
+    # the pipeline fills: a cycle, an instruction, and the diagonal grows
+    for expected in range(1, 5):
+        on = s.cycle_on()
+        assert on.now == expected
+        assert on.stepped == 1
+        assert s.count().instructions == expected + 1
+    assert s.pipeline().cycle == 4  # and the views are told which cycle it is
+
+
+def test_the_cycles_run_out_where_the_run_does(tmp_path):
+    """The diagram ends with the run, and the cycle sticks to the last of them
+    rather than walking off into cycles nobody will ever time."""
+    s = session(SUM, tmp_path, pipeline=Pipeline(PipelineSettings()))
+    s.carry_on()
+    last = s.cycle_on(10_000)
+    assert last.ended and last.now == last.cycles - 1
+    again = s.cycle_on()
+    assert again.now == last.now and again.stepped == 0
+
+
+def test_a_machine_that_cannot_go_on_stops_the_walk_of_the_cycles(tmp_path):
+    """A `wfi` with nothing to wait for is a machine that is not over and will not
+    move either (DEV-46). The walk must stop where the machine does rather than
+    asking it for another instruction for ever."""
+    s = session(".text\nmain: wfi\n", tmp_path,
+                pipeline=Pipeline(PipelineSettings()))
+    on = s.cycle_on(50)
+    assert not on.ended  # the run is not over: it is waiting for what cannot come
+    assert on.stepped <= 2  # it asked, was given nothing, and let it be
+    # and nothing was timed at all, so there is no cycle to look at
+    assert (on.now, on.cycles) == (-1, 0)
+    assert s.count().instructions == 0
+
+
+def test_a_restart_is_at_no_cycle_of_the_model_either(tmp_path):
+    s = session(SUM, tmp_path, pipeline=Pipeline(PipelineSettings()))
+    s.cycle_on(4)
+    assert s.cycle_now == 3  # four cycles on from no cycle at all is the fourth
+    s.restart()
+    assert s.cycle_now == -1
+    assert s.pipeline().cycle == -1
+
+
+def test_there_are_no_cycles_to_walk_without_a_pipeline(sum_session):
+    with pytest.raises(ValueError, match="no pipeline was asked for"):
+        sum_session.cycle_on()
+
+
 def test_the_diagram_the_pipeline_kept(tmp_path):
     s = session(SUM, tmp_path, pipeline=Pipeline(PipelineSettings()))
     s.carry_on()

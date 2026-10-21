@@ -42,9 +42,15 @@ class Canvas(Gtk.DrawingArea):
         self.queue_draw()
 
     def _drawn(self, area, context, width: int, height: int) -> None:
-        words = self.get_color()  # the colour of text in this theme
+        shown = self.get_color()  # the colour of text in this theme
+        words = (shown.red, shown.green, shown.blue, shown.alpha)
         for part in self.picture.parts:
-            if part.width and part.height:
+            # A box is made only where something will be painted with it. A
+            # rectangle left in the path with nothing done to it is handed to
+            # whatever is painted NEXT, which showed up as a row of the pipeline
+            # painted in the colour of the row under it, over its own words (the
+            # architect, 2026-10-23).
+            if part.width and part.height and (part.fill or part.edge):
                 context.rectangle(part.x + MARGIN, part.y + MARGIN, part.width,
                                   part.height)
                 if part.fill:
@@ -55,12 +61,16 @@ class Canvas(Gtk.DrawingArea):
                         context.fill()
                 if part.edge:
                     context.set_source_rgb(*COLOURS[part.edge])
-                    context.set_line_width(1.0)
+                    context.set_line_width(part.line)
                     context.stroke()
             if part.text:
-                self._written(context, part, words)
+                # Words on a colour of the DATA are ink: every fill of a picture is
+                # a pale one, so the theme's own colour would be white on pale in
+                # the dark and unreadable.
+                self._written(context, part,
+                              (*COLOURS["ink"], 1.0) if part.fill else words)
 
-    def _written(self, context, part, words) -> None:
+    def _written(self, context, part, colour) -> None:
         """One word of a picture: in the middle of its box where it has one, and at
         its own place where it has not."""
         layout = self.create_pango_layout(part.text)
@@ -71,8 +81,9 @@ class Canvas(Gtk.DrawingArea):
             x += (part.width - wide) / 2
             y += (part.height - tall) / 2
         context.move_to(x, y)
-        context.set_source_rgba(words.red, words.green, words.blue,
-                               words.alpha * (0.6 if part.dim else 1.0))
+        red, green, blue, alpha = colour
+        context.set_source_rgba(red, green, blue,
+                                alpha * (0.6 if part.dim else 1.0))
         PangoCairo.show_layout(context, layout)
 
 

@@ -25,6 +25,9 @@ from dataclasses import dataclass
 # The colours of the data, as red, green and blue.
 COLOURS = {
     "frame": (0.55, 0.55, 0.58),
+    # What is written ON a colour of the data. Every fill here is a pale one, so
+    # the words on it are dark whatever the theme of the desktop is.
+    "ink": (0.12, 0.12, 0.14),
     "empty": (0.86, 0.86, 0.88),
     "clean": (0.52, 0.74, 0.93),
     "dirty": (0.95, 0.62, 0.44),
@@ -64,6 +67,7 @@ class Part:
     text: str = ""
     size: float = 11.0
     dim: bool = False  # a word that is there to be glanced at, not read
+    line: float = 1.0  # how thick the edge is drawn
 
 
 @dataclass(frozen=True, slots=True)
@@ -79,8 +83,7 @@ class Picture:
 BLOCK = (134.0, 26.0)  # one block of a cache
 SET = 58.0  # the room beside the grid for the name of a set
 LINE = 20.0  # one line of writing
-CYCLE = 28.0  # one cycle of the pipeline
-STEP = 22.0  # one instruction of the diagram
+STAGE = (56.0, 22.0)  # one cell of the diagram: one stage of one instruction
 WHERE = 190.0  # the room beside the diagram for the place and the instruction
 KEY = 38.0  # one key of the lab's keyboard
 SEGMENT = 11.0  # how thick a segment of a display is
@@ -143,32 +146,63 @@ def _widest(seen) -> int:
                 for cache in seen), default=1)
 
 
-def pipeline_picture(rows) -> Picture:
-    """The diagram: a row to an instruction, a column to a cycle, and the five
-    stages of each instruction laid along it.
+def pipeline_picture(rows, cycle: int = -1) -> Picture:
+    """The diagram: a row to an instruction, a column to a STAGE, and in every cell
+    the cycle that stage of that instruction happened in.
 
-    What is to be seen in it is the diagonal: every instruction one cycle behind
-    the one before it, and wherever the diagonal breaks something was waited for -
-    a result that had not been written back, a branch that was guessed wrongly.
+    The stages stand under one another and are NOT shifted along by their cycle
+    (the architect, 2026-10-23, of the first drawing: "the logic of the steps
+    cannot be read"). A cell that says which cycle it was says everything a column
+    of boxes said and says it where the eye already is; what happens at the SAME
+    time then reads as a diagonal, and that diagonal is what a frame is drawn
+    round when a cycle is being looked at. A stage that held its instruction for
+    several cycles says so - `4-7` - so the waiting is in the picture as well.
     """
     if not rows:
         return Picture(0.0, 0.0)
     parts: list[Part] = []
     cycles = max(row.starts[-1] + 1 for row in rows)
-    for cycle in range(cycles):
-        if cycle % 5 == 0:
-            parts.append(Part(WHERE + cycle * CYCLE, 0.0, text=str(cycle),
-                              size=10.0, dim=True))
+    head = 0.0
+    if cycle >= 0:
+        parts.append(Part(0.0, 0.0, text=f"cycle {cycle} of {cycles}", size=12.0))
+        head = LINE + 2.0
+    # The names of the stages, each in the colour its own cells are painted in, so
+    # that a column is read by its colour as well as by its place.
+    for index, name in enumerate(INITIALS):
+        parts.append(Part(WHERE + index * STAGE[0], head, STAGE[0] - 2.0,
+                          LINE - 2.0, fill=STAGES[index], edge="frame",
+                          text=name, size=10.0))
     for index, row in enumerate(rows):
-        y = LINE + index * STEP
-        parts.append(Part(0.0, y + 2.0,
+        y = head + LINE + index * STAGE[1]
+        parts.append(Part(0.0, y + 4.0,
                           text=f"0x{row.address:08x}  {row.mnemonic}", size=10.0))
-        for stage, (name, start) in enumerate(zip(STAGES, row.starts)):
-            wide = row.ex_cycles if name == "execute" else 1
-            parts.append(Part(WHERE + start * CYCLE, y, CYCLE * wide - 2.0,
-                              STEP - 2.0, fill=name, edge="frame",
-                              text=INITIALS[stage], size=9.0))
-    return Picture(WHERE + cycles * CYCLE, LINE + len(rows) * STEP, tuple(parts))
+        for stage, span in enumerate(spans(row)):
+            parts.append(Part(WHERE + stage * STAGE[0], y, STAGE[0] - 2.0,
+                              STAGE[1] - 2.0, fill=STAGES[stage], edge="frame",
+                              text=_cycles_of(span), size=10.0))
+            if span[0] <= cycle <= span[1]:
+                # The frame of the cycle being looked at: what the machine has in
+                # hand at this moment, and nothing else.
+                parts.append(Part(WHERE + stage * STAGE[0] - 1.0, y - 1.0,
+                                  STAGE[0], STAGE[1], edge="lit", line=3.0))
+    return Picture(WHERE + 5 * STAGE[0], head + LINE + len(rows) * STAGE[1],
+                   tuple(parts))
+
+
+def spans(row) -> tuple[tuple[int, int], ...]:
+    """The first and the last cycle each stage of an instruction held it.
+
+    A stage keeps its instruction until the next stage takes it, so one stage ends
+    where the next begins; the writing back is the one cycle it is given.
+    """
+    starts = row.starts
+    return tuple((starts[one], starts[one + 1] - 1) for one in range(4)) + (
+        (starts[4], starts[4]),)
+
+
+def _cycles_of(span) -> str:
+    """What a cell says: the cycle it was, or the first and the last of them."""
+    return str(span[0]) if span[1] <= span[0] else f"{span[0]}-{span[1]}"
 
 
 def lab_picture(looks) -> Picture:

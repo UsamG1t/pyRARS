@@ -267,9 +267,20 @@ class CacheSeen:
 
 
 @dataclass(frozen=True, slots=True)
+class Cycle:
+    """Where the model of the pipeline is being looked at."""
+
+    now: int  # the cycle on show; -1 until somebody has asked for one
+    cycles: int  # how many of them the model knows about
+    stepped: int  # instructions the machine had to carry out to find this one out
+    ended: bool  # whether the run is over, so that no more cycles will come
+
+
+@dataclass(frozen=True, slots=True)
 class PipelineSeen:
     """The time a run would have taken, as the model of it counted."""
 
+    cycle: int  # the cycle being looked at, or -1 for none
     settings: tuple[Setting, ...]
     cycles: int
     instructions: int
@@ -369,6 +380,9 @@ class Session:
         # says so instead of wandering: the way back is a restart - or a step
         # back, for the journal reaches over the end of a run like anywhere else.
         self.ended = False
+        # Which cycle of the model of the pipeline is being looked at; -1 is none,
+        # which is where every run begins.
+        self.cycle_now = -1
         self._build()
 
     # ------------------------------------------------------------- the machine
@@ -410,6 +424,7 @@ class Session:
         self._watches = {number: replace(watch, hits=0)
                          for number, watch in self._watches.items()}
         self.ended = False
+        self.cycle_now = -1  # a fresh run is at no cycle of the model either
         self._build()
         return Stopped(NOTHING, self.where())
 
@@ -811,11 +826,47 @@ class Session:
         model = self.models.pipeline
         if model is None:
             return None
-        return PipelineSeen(_settings(model.settings), model.cycles,
+        return PipelineSeen(self.cycle_now, _settings(model.settings), model.cycles,
                             model.instructions, model.cpi, model.lost,
                             tuple(Setting(cause, many)
                                   for cause, many in sorted(model.stalls.items())),
                             model.branches, model.mispredictions)
+
+    def cycle_on(self, count: int = 1) -> Cycle:
+        """On by one cycle of the MODEL of the pipeline.
+
+        A cycle is no step of the machine. The model is a model of TIME over a run
+        that has already happened (INV-P), so to know what is in the pipeline at
+        the next cycle the machine is carried on - one instruction at a time, and
+        no further than it must be. Six steps of the machine and twenty-five cycles
+        of the model are the same five instructions (the architect, 2026-10-23), and
+        this is what lets somebody watch the second of those.
+
+        What is DRAWN of an instruction is its whole way through the five stages,
+        because the run has happened and the model knows it; a real machine at that
+        cycle would not know yet. That is what a model of time is, and whoever
+        shows one says so.
+        """
+        model = self.models.pipeline
+        if model is None:
+            raise ValueError("no pipeline was asked for, so there are no cycles "
+                             "to walk")
+        wanted = self.cycle_now + max(count, 1)
+        stepped = 0
+        # On until an instruction has been FETCHED after the cycle wanted: only
+        # then is everything that is in flight in that cycle known, and the
+        # diagonal of it whole. So the machine runs a pipeline's depth ahead of
+        # what is being looked at, which is the price of a model of time.
+        while model.fetching <= wanted and not self.ended:
+            before = self.simulator.count
+            self.step()
+            stepped += 1
+            if self.simulator.count == before:
+                break  # the machine went nowhere: no more cycles will ever come
+        # Never past the last cycle the model knows of - and where it knows of
+        # none at all, no cycle is being looked at.
+        self.cycle_now = min(wanted, model.cycles - 1)
+        return Cycle(self.cycle_now, model.cycles, stepped, self.ended)
 
     def diagram(self) -> list[StageSeen]:
         """The diagram the model kept, as far back as it was told to keep it."""

@@ -168,7 +168,7 @@ def test_what_is_left_out_of_a_cache_is_still_part_of_one():
 
 def test_what_can_be_set_about_a_pipeline():
     assert [one.name for one in runs.options_of("pipeline")] == [
-        "forwarding", "one_port", "penalty", "trap_penalty", "diagram"]
+        "forwarding", "one_port", "overlap", "penalty", "trap_penalty", "diagram"]
 
 
 def test_what_can_be_set_about_a_device_is_what_it_is_built_with():

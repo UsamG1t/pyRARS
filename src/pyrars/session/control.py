@@ -185,6 +185,12 @@ class Waiting:
         return line
 
 
+def _no_stop(answer) -> None:
+    """A movement that does not end in a `Stopped`: the snapshot carries no reason
+    to have stopped, because nothing of the machine was asked to stop."""
+    return None
+
+
 class RunController:
     """One thread, one machine, one way in and one way out."""
 
@@ -253,6 +259,16 @@ class RunController:
         """
         self._movement("until", lambda session: session.until(
             where if isinstance(where, int) else session.address_of(where)))
+
+    def cycle(self, count: int = 1) -> None:
+        """On by a cycle of the model of the pipeline.
+
+        It is a MOVEMENT, because knowing what is in the pipeline at the next cycle
+        may mean carrying some instructions out; where it does not, nothing of the
+        machine moves and the snapshot says as much. Which cycle it now is comes
+        back with the models, like everything else about them.
+        """
+        self._movement("cycle", lambda session: _no_stop(session.cycle_on(count)))
 
     def restart(self) -> None:
         self.waiting.forget()

@@ -416,6 +416,10 @@ OF_SETTINGS: dict[str, str] = {
                            "it before it has been written back, instead of waiting",
     "pipeline.one_port": "Whether fetching an instruction and reaching into memory "
                          "share one way to it, so that one of the two must wait",
+    "pipeline.overlap": "Whether an instruction may begin before the one before it "
+                        "has finished - which is what a pipeline IS. Turn it off "
+                        "and the same run is timed on a machine that does one "
+                        "instruction at a time, five cycles to each",
     "pipeline.penalty": "How many cycles are thrown away when a branch was guessed "
                         "wrongly",
     "pipeline.trap_penalty": "How many cycles are thrown away by an instruction "

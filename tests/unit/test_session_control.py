@@ -461,11 +461,13 @@ def test_a_speed_may_be_changed_while_the_run_goes_on(told, tmp_path):
         crawled = told.last.instructions - counted
         control.stop()
         assert control.settled()
-    # three a second there or thereabouts, against the twenty thousand a second it
-    # was going at. The bound is loose on purpose: this is a test of a ceiling on a
-    # machine that may be busy with something else, and what it has to tell apart
-    # is a handful from a torrent (it failed once at ten, under the whole suite).
-    assert 1 <= crawled <= 30
+    # Three a second there or thereabouts, against the twenty thousand a second it
+    # was going at: what this has to tell apart is a HANDFUL from a torrent. There
+    # is no bound below, because the machine running the test may be busy with
+    # something else and give the thread of the run no turn at all in half a second
+    # (both bounds were tried and both flaked under the whole suite); that a slowed
+    # run moves at all is what the two tests above this one are for.
+    assert crawled <= 30
 
 
 # ----------------------------------------------------------- what is watched

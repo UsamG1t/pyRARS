@@ -36,6 +36,7 @@ class Action:
     keys: str  # the accelerator, in the spelling of GTK
     states: frozenset[str]  # the states of a run in which it is possible at all
     journal: bool = False  # whether it needs something in the journal as well
+    pipeline: bool = False  # whether it needs a pipeline to be modelled
 
 
 ACTIONS = (
@@ -53,6 +54,12 @@ ACTIONS = (
            "from the convention", "<Shift>F6", frozenset({STANDING})),
     Action("back", "Back", "Take the last step back", "F8",
            frozenset({STANDING, ENDED}), journal=True),
+    # A cycle of the MODEL of the pipeline, which is a smaller thing than a step of
+    # the machine and is not a step of it at all: it is next to Step because that
+    # is what somebody comparing the two reaches for.
+    Action("cycle", "Cycle", "Carry the model of the pipeline on by one cycle - a "
+           "smaller thing than an instruction, and not a step of the machine",
+           "<Shift>F7", frozenset({STANDING, ENDED}), pipeline=True),
     Action("pause", "Pause", "Let the machine stand where it is; the run may carry "
            "on from there", "F9", frozenset({RUNNING})),
     # A program waiting for a line can only be ended: the machine is not going
@@ -98,11 +105,15 @@ FILES = (
 BY_NAME = {action.name: action for action in ACTIONS + FILES}
 
 
-def possible(state: str, journal: int = 0) -> frozenset[str]:
+def possible(state: str, journal: int = 0,
+             pipeline: bool = False) -> frozenset[str]:
     """The actions of the RUN that can be done now: in this state of the run, with
-    this many steps left in the journal."""
+    this many steps left in the journal, and with or without a pipeline being
+    modelled - for a cycle of a pipeline that nobody asked for is no cycle at all.
+    """
     return frozenset(action.name for action in ACTIONS
-                     if state in action.states and (journal or not action.journal))
+                     if state in action.states and (journal or not action.journal)
+                     and (pipeline or not action.pipeline))
 
 
 def possible_of_a_file(pages: int = 0, modified: bool = False, named: bool = True,

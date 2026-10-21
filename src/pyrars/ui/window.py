@@ -376,7 +376,9 @@ class Window(Adw.ApplicationWindow):
         alike."""
         page = self.editor.page
         buffer = page.buffer if page is not None else None
-        return actions.possible(self.state, self.journal) | actions.possible_of_a_file(
+        return actions.possible(
+            self.state, self.journal,
+            pipeline=self.settings.pipeline is not None) | actions.possible_of_a_file(
             len(self.editor.pages), self.editor.modified,
             named=bool(page.path) if page is not None else True,
             undo=bool(buffer and buffer.get_can_undo()),
@@ -387,6 +389,10 @@ class Window(Adw.ApplicationWindow):
         allowed = self.allowed()
         for name, button in self.buttons.items():
             button.set_sensitive(name in allowed)
+        # A cycle of the pipeline is not THERE at all unless a pipeline is being
+        # modelled: a button that can never be pressed is a button in the way, and
+        # this one arrives with the page it belongs to (the architect, 2026-10-23).
+        self.buttons["cycle"].set_visible(self.settings.pipeline is not None)
 
     # ---------------------------------------------------------------- the files
 
@@ -482,6 +488,7 @@ class Window(Adw.ApplicationWindow):
             self._said(f"the settings of the run could not be kept: "
                        f"{problem.strerror or problem}")
         self._pages_again()
+        self._possible()  # the cycle of the pipeline comes and goes with it
         self._said(f"the run: {shown.run_called(settings)}{kept}")
         if self.session_is_open:
             self._said("assemble again to run it that way")
@@ -702,7 +709,9 @@ class Window(Adw.ApplicationWindow):
             drawing.cache_picture(values["caches"], values["blocks"]))
         self.views_of["pipeline"].show(shown.pipeline(values["pipeline"],
                                                       values["guesser"]))
-        self.pictures["pipeline"].show(drawing.pipeline_picture(values["diagram"]))
+        self.pictures["pipeline"].show(drawing.pipeline_picture(
+            values["diagram"],
+            values["pipeline"].cycle if values["pipeline"] else -1))
         self.views_of["counted"].show(shown.counted(values["counted"]))
         self.pictures["counted"].show(drawing.bars_picture(values["counted"]))
         for name, wanted in (("cache", values["caches"]),
