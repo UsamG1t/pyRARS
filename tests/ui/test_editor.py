@@ -7,6 +7,12 @@ ACCEPTS it and paints with it, which nothing but GtkSourceView can say.
 
 import pytest
 
+import gi
+
+gi.require_version("Gtk", "4.0")
+
+from gi.repository import Gtk  # noqa: E402 - after require_version
+
 pytestmark = pytest.mark.ui
 
 SUM = """\
@@ -338,6 +344,45 @@ class Asking:
 
     def get_buffer(self):
         return self.buffer
+
+
+def test_a_letter_typed_reaches_the_completion_and_the_window_lives(editor, file,
+                                                                   showing, turning):
+    """The whole path THROUGH GTK: a letter typed, the provider asked for words,
+    the words shown in the popup.
+
+    This is the test the project did not have, and its absence cost the architect
+    his window (2026-10-23): every way of COMPLETING the populate from Python
+    crashes GTK, because the callback it hands in cannot be called back from here,
+    and a test that only called `offered` never went near the handing over. A
+    segfault takes the whole test process with it, which is as loud as a failure
+    can be.
+    """
+    showing(editor)
+    page = editor.open(file).get_child()
+    page.view.grab_focus()
+    assert turning(lambda: page.view.has_focus(), 2.0)
+    for letter in "\n        ad":
+        page.buffer.insert_at_cursor(letter)
+        assert turning(lambda: True, 0.2)  # let GTK ask, as it does while typing
+    offered = page.words.proposals
+    assert offered is not None, "the provider was never asked"
+    words = [offered.get_item(index).text for index in range(offered.get_n_items())]
+    assert words[:2] == ["add", "addi"]
+    # and they are really on the screen, in the popup of the completion
+    assert "addi" in _labels(editor.get_root())
+
+
+def _labels(widget) -> list[str]:
+    """Every word written anywhere in a window that is on the screen."""
+    said = []
+    if isinstance(widget, Gtk.Label) and widget.get_mapped():
+        said.append(widget.get_text())
+    child = widget.get_first_child()
+    while child is not None:
+        said += _labels(child)
+        child = child.get_next_sibling()
+    return said
 
 
 def test_the_words_offered_come_from_where_the_typing_is(editor, file):

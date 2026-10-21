@@ -255,7 +255,8 @@ class Editor(Gtk.Box):
     def add(self, text: str = "", path: str | None = None) -> Adw.TabPage:
         page = Page(self.languages, path, text)
         page.buffer.connect("modified-changed", lambda *gone: self.changed())
-        page.view.get_completion().add_provider(Words(lambda: self.labels))
+        page.words = Words(lambda: self.labels)
+        page.view.get_completion().add_provider(page.words)
         page.view.connect("line-mark-activated", self._gutter)
         tab = self.tabs.append(page)
         self._named(tab, page)
@@ -521,19 +522,36 @@ class Words(GObject.Object, GtkSource.CompletionProvider):
     def __init__(self, labels=None) -> None:
         super().__init__()
         self.labels = labels if labels is not None else (lambda: ())
+        self.proposals = None  # the words last offered, for whoever asks
 
     def do_get_title(self) -> str:
         return "pyRARS"
 
     def do_populate_async(self, context, cancellable, callback, data=None) -> None:
-        task = Gio.Task.new(self, cancellable, callback, data)
-        store = Gio.ListStore.new(Word)
+        """The words for where the typing is, handed to the context AT ONCE.
+
+        The operation is deliberately never COMPLETED, and the callback GTK hands
+        in is never called. That is what the interface itself offers this method
+        for - "for providers that would like to populate a list model while those
+        results are displayed to the user,
+        `gtk_source_completion_context_set_proposals_for_provider` may be used" -
+        and from Python it is the only way there is: a `GAsyncReadyCallback` that
+        came from C CANNOT be called back from here. PyGObject does not pass on the
+        pointer GTK gave along with it, so GTK reads a stranger's address for the
+        context it was told to fill, and the window dies where it stands.
+
+        That was the architect's segfault of 2026-10-23: a comma typed on a Russian
+        keyboard is `б`, and any letter at all would have done it. Three ways of
+        completing the operation were tried and all three crash, two of them inside
+        `gtk_source_completion_context_set_proposals_for_provider` with a context
+        that is not one; this way crashes nothing and the words appear.
+        """
+        self.proposals = store = Gio.ListStore.new(Word)
         for text in self.offered(context):
             store.append(Word(text))
-        task.return_value(store)
-
-    def do_populate_finish(self, result):
-        return result.propagate_value().value
+        # The context takes a reference of its own; the one kept above is so that a
+        # test - or a window - can ask what was last offered.
+        context.set_proposals_for_provider(self, store)
 
     def offered(self, context) -> tuple[str, ...]:
         """The words for where the typing is."""
