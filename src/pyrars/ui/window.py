@@ -17,8 +17,8 @@ gi.require_version("Adw", "1")
 from gi.repository import Adw, Gio, GLib, Gtk  # noqa: E402 - after require_version
 
 from pyrars.session.control import (  # noqa: E402
-    ASKING, ENDED, LOAD, NOTHING, RUNNING, STANDING, WAITING, Answer, Failed,
-    RunController, Snapshot)
+    ASKING, DEVICE, ENDED, LOAD, NOTHING, RUNNING, STANDING, WAITING, Answer,
+    Failed, RunController, Snapshot)
 from pyrars.session import project as projects  # noqa: E402
 from pyrars.session import settings as runs  # noqa: E402
 from pyrars.session.project import Project  # noqa: E402
@@ -122,6 +122,9 @@ class Window(Adw.ApplicationWindow):
         # of the devices, which are built when a device is first attached.
         self.panels: dict[str, Gtk.Widget] = {}
         self.pages_now: list[str] = []
+        # Where the area of the devices begins, which is the memory configuration's
+        # to say and comes back with the models.
+        self.mmio_base = 0
         self.console = _telling()
         self.messages = _telling()
         self.set_content(self._built())
@@ -325,7 +328,8 @@ class Window(Adw.ApplicationWindow):
         what it held."""
         if name not in self.panels:
             if name.startswith(_DEVICE):
-                self.panels[name] = devices.Panel(name[len(_DEVICE):])
+                self.panels[name] = devices.Panel(name[len(_DEVICE):],
+                                                  pressed=self._key_pressed)
             else:
                 self.panels[name] = _side_by_side(
                     _scrolled(self.pictures[name]), self.views_of[name])
@@ -589,6 +593,9 @@ class Window(Adw.ApplicationWindow):
             elif event.what == MODELS:
                 self._models_shown(event.value)
                 return GLib.SOURCE_REMOVE
+            elif event.what == DEVICE:
+                self._device_shown(event.value)
+                return GLib.SOURCE_REMOVE
             self._said(f"{event.what}: {_short(event.value)}")
         elif isinstance(event, Failed):
             self._said(f"{event.what} failed: {event.message}")
@@ -696,6 +703,22 @@ class Window(Adw.ApplicationWindow):
         self.views_of["floats"].show(shown.floats(values["floats"], self.format))
         self.views_of["control"].show(shown.control(values["control"], self.format))
 
+    def _key_pressed(self, device: str, key: int) -> None:
+        """A key of a device was pressed on the screen.
+
+        It is the world outside reaching into the machine, so it goes to the thread
+        of the run like everything else, and it does not wait for a movement to end
+        - a program that is running and asking for a key is exactly when it
+        matters. What comes back is the device as it now is.
+        """
+        self.control.press(device, key)
+
+    def _device_shown(self, seen) -> None:
+        """One device, after something was done to it."""
+        panel = self.panels.get(f"{_DEVICE}{seen.name}")
+        if panel is not None:
+            panel.show(seen, self.mmio_base)
+
     def _models_shown(self, values: dict) -> None:
         """What is attached to the machine, and what the models counted.
 
@@ -718,11 +741,12 @@ class Window(Adw.ApplicationWindow):
                              ("pipeline", values["pipeline"]),
                              ("counted", values["counted"])):
             self.views_of[name].says("" if wanted else _NOT_GIVEN % _THINGS[name])
+        self.mmio_base = values["base"]
         attached = {seen.name: seen for seen in values["devices"]}
         for name in self.pages_now:
             if name.startswith(_DEVICE):
                 self.panels[name].show(attached.get(name[len(_DEVICE):]),
-                                       self.format, values["base"])
+                                       values["base"])
 
     def _places_shown(self, values: dict) -> None:
         self.views_of["data"].show(shown.data(values["data"], self.format))

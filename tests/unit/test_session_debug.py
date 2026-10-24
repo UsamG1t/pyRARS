@@ -598,6 +598,42 @@ def test_the_devices_show_themselves(tmp_path):
     assert s.device("timer").name == "timer"
 
 
+def test_a_key_of_a_device_pressed_from_outside(tmp_path):
+    """The world outside reaching IN, which is the other way from everything else
+    a session answers: a program that asks for a number by the sixteen buttons of
+    the lab needs somebody to press them."""
+    s = session(SUM, tmp_path, bus=DeviceBus([make("lab")]))
+    seen = s.press("lab", 6)
+    assert seen.name == "lab" and seen.looks["key"] == 6
+    assert seen.state["key down"] == 6
+    # a key of that lab that is already down goes up again, because its keys are
+    # buttons that stay down - the device's own doing, not the session's
+    assert s.press("lab", 6).looks["key"] == -1
+
+
+def test_pressing_a_key_is_no_step_of_the_machine(tmp_path):
+    """The journal knows nothing of it, exactly as `set` and `poke` are not steps
+    either (the rule of the journal)."""
+    s = session(SUM, tmp_path, bus=DeviceBus([make("lab")]))
+    s.step(3)
+    before = s.count()
+    s.press("lab", 1)
+    assert s.count() == before
+
+
+def test_a_device_with_no_keys_to_press(tmp_path):
+    s = session(SUM, tmp_path, bus=DeviceBus([make("timer")]))
+    with pytest.raises(ValueError, match="no keys to press"):
+        s.press("timer", 0)
+    with pytest.raises(ValueError, match="no device of that name is attached"):
+        s.press("lab", 0)
+
+
+def test_a_key_pressed_with_nothing_attached(sum_session):
+    with pytest.raises(ValueError, match="no device of that name is attached"):
+        sum_session.press("lab", 0)
+
+
 def test_the_blocks_a_cache_holds(tmp_path):
     s = session(SUM, tmp_path, caches=Caches(CacheSettings(block_bytes=16, sets=4)))
     s.carry_on()

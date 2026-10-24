@@ -8,8 +8,8 @@ Not every device has a picture, and one is not invented for those that have not:
 timer is a time and a time it was asked for, a halt register is the word last
 written to it, and a drawing of a number tells nobody anything that the number
 does not. A device with a picture gets it BESIDE its table - the bitmap display its units,
-the keyboard and display the text it shows, the digital lab its segments and its
-keys, the disk its blocks, the controller of direct access how far it has got.
+the keyboard and display the text it shows, the digital lab its segments and
+its keys, the disk its blocks, the controller how far it has got.
 Beside, because the room the views have is wide and shallow while a picture and a
 table of names and values are both narrow and long (the architect, 2026-10-22).
 
@@ -71,9 +71,14 @@ class Panel(Gtk.Box):
 
     __gtype_name__ = "PyrarsDevicePanel"
 
-    def __init__(self, name: str, **kept) -> None:
+    def __init__(self, name: str, pressed=None, **kept) -> None:
         super().__init__(orientation=Gtk.Orientation.VERTICAL, **kept)
         self.device = name
+        # Called with the device and the key when somebody presses one. A device
+        # may be TALKED TO and not only looked at: a program that asks for a
+        # number by its sixteen buttons is a task somebody sets (the architect,
+        # 2026-10-22).
+        self.pressed = pressed or (lambda device, key: None)
         self.table = Table(shown.ONE_STATE,
                            f"The {name} says nothing of itself until a program is "
                            "assembled")
@@ -83,6 +88,8 @@ class Panel(Gtk.Box):
             self.append(self.table)
             return
         self.picture, self.made = drawn[0](), drawn[1]
+        if isinstance(self.picture, Canvas):
+            self.picture.pressed = self._clicked
         # A picture that scrolls itself is put in as it is; one that does not is
         # given something to scroll in, because a bitmap display of 512 by 256 is
         # wider and taller than any room it will be given.
@@ -96,15 +103,31 @@ class Panel(Gtk.Box):
         pane.set_resize_end_child(True)
         self.append(pane)
 
-    def show(self, seen, form: str = "hex", base: int = 0) -> None:
+    def _clicked(self, what: str) -> None:
+        """Something of the picture was pressed."""
+        key = _clicked_on(what)
+        if key is not None:
+            self.pressed(self.device, key)
+
+    def show(self, seen, base: int = 0) -> None:
         """What the device is now: its table always, and its picture where it has
         one. A device that is not attached any more is left as it was - the last
         thing it held is more use than an empty panel."""
         if seen is None:
             return
-        self.table.show(shown.one_state(seen, form, base))
+        self.table.show(shown.one_state(seen, base))
         if self.picture is not None:
             self.picture.show(self.made(seen.looks))
+
+
+def _clicked_on(what: str) -> int | None:
+    """The key a part of a picture stands for, or nothing where it stands for
+    something else. The names come from the picture itself (`ui/drawing.py`), so
+    what can be pressed is said in one place and read in another."""
+    if not what.startswith(drawing.KEY_PRESSED):
+        return None
+    which = what[len(drawing.KEY_PRESSED):]
+    return int(which) if which.isdigit() else None
 
 
 def _scrolled(child: Gtk.Widget) -> Gtk.Widget:

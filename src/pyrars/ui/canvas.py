@@ -30,10 +30,34 @@ class Canvas(Gtk.DrawingArea):
 
     __gtype_name__ = "PyrarsCanvas"
 
-    def __init__(self, **kept) -> None:
+    def __init__(self, pressed=None, **kept) -> None:
         super().__init__(**kept)
         self.picture = Picture(0.0, 0.0)
+        # Called with the NAME of a part that is clicked, where the picture gave
+        # that part one: a key of the digital lab, and whatever comes after it.
+        self.pressed = pressed
         self.set_draw_func(self._drawn)
+        clicking = Gtk.GestureClick()
+        clicking.connect("released", self._clicked)
+        self.add_controller(clicking)
+
+    def at(self, x: float, y: float) -> str:
+        """What is at a place of the widget: the name of the part drawn there.
+
+        The parts are looked through BACKWARDS, because the last drawn is the one
+        on top, and only those the picture gave a name to can be pressed at all.
+        """
+        for part in reversed(self.picture.parts):
+            if (part.name and part.width and part.height
+                    and part.x + MARGIN <= x <= part.x + MARGIN + part.width
+                    and part.y + MARGIN <= y <= part.y + MARGIN + part.height):
+                return part.name
+        return ""
+
+    def _clicked(self, gesture, count: int, x: float, y: float) -> None:
+        pressed = self.at(x, y)
+        if pressed and self.pressed is not None:
+            self.pressed(pressed)
 
     def show(self, picture: Picture) -> None:
         self.picture = picture

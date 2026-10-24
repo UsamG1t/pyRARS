@@ -242,18 +242,21 @@ def device_title(name: str) -> str:
     return TITLES.get(name, name.capitalize())
 
 
-def one_state(seen, form: str = "hex", base: int = 0
-              ) -> tuple[tuple[str, ...], ...]:
+def one_state(seen, base: int = 0) -> tuple[tuple[str, ...], ...]:
     """What ONE device is and holds, for the panel of that device.
 
     Where it answers and how much room it takes come first, because that is what a
     program needs of it and the device itself never says; a device that answers no
     address - the bitmap display watches memory instead - says so rather than
-    showing a number anybody would read as an address. After that come the device's
-    own words: a number in the format chosen for everything else, a yes or no as a
-    yes or no, since a device that says `True` says nothing about a bit, and
-    whatever it says of its own making ("virtual (1 ms an instruction)") as it
-    comes.
+    showing a number anybody would read as an address.
+
+    After that come the device's own words: a yes or no as a yes or no, since a
+    device that says `True` says nothing about a bit; whatever it says of its own
+    making ("virtual (1 ms an instruction)", "0x00 (a b c)") as it comes; and a
+    number IN DECIMAL, whatever format was chosen for the machine. A device counts
+    keys, blocks and milliseconds, and `0x00000005` is no way to say which key is
+    down (the architect, 2026-10-22). What a device means as bits it writes as
+    bits itself.
     """
     if seen is None:
         return ()
@@ -261,7 +264,7 @@ def one_state(seen, form: str = "hex", base: int = 0
              else f"0x{base + seen.offset:08x}")]
     if seen.size is not None:
         rows.append(("size", f"{seen.size} bytes"))
-    rows += [(name, _as_it_is(value, form)) for name, value in seen.state.items()]
+    rows += [(name, _as_it_is(value, "dec")) for name, value in seen.state.items()]
     return tuple(rows)
 
 

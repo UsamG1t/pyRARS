@@ -92,9 +92,11 @@ def test_what_one_device_is_and_holds():
     assert rows[0] == ("where", "0xffff0018")
     assert rows[1] == ("size", "16 bytes")
     assert rows[2] == ("clock", "virtual (1 ms)")  # its own words, as they come
-    assert rows[3] == ("time", "0x00000100")  # a number, in the format chosen
+    # a number of a DEVICE is in decimal whatever format the machine is read in: a
+    # device counts keys, blocks and milliseconds, and `0x00000100` is no way to
+    # say which key is down
+    assert rows[3] == ("time", "256")
     assert rows[4] == ("armed", "no")  # and never "False"
-    assert one_state(seen, "dec", 0xFFFF0000)[3] == ("time", "256")
     assert one_state(None) == ()
 
 

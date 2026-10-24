@@ -18,9 +18,10 @@ import time
 import pytest
 
 from pyrars.session import project as projects
+from pyrars.devices import DeviceBus, make
 from pyrars.session.control import (
-    ASKING, ENDED, LOAD, NOTHING, RUNNING, STANDING, WAITING, Answer, Failed,
-    RunController, Snapshot, Waiting)
+    ASKING, DEVICE, ENDED, LOAD, NOTHING, RUNNING, STANDING, WAITING, Answer,
+    Failed, RunController, Snapshot, Waiting)
 
 SUM = """\
 .globl main
@@ -511,6 +512,81 @@ def test_a_watched_question_that_cannot_be_answered_is_let_go(told, tmp_path):
     assert [(one.what, one.message) for one in told.failures] \
         == [("broken", "nothing like it")]
     assert told.last.state == STANDING and told.last.instructions == 5
+
+
+# ------------------------------------------------------- the world outside
+
+# A program that waits for a key of the FIRST ROW of the digital lab (which is the
+# keys 0 to 3, for the keyboard answers about one row at a time) and stops once it
+# has one.
+WAITS_FOR_A_KEY = """\
+.globl main
+.text
+main:   li      s0, 0xffff0010
+        li      t0, 1
+look:   sb      t0, 2(s0)
+        lbu     t1, 4(s0)
+        beq     t1, zero, look
+        li      a7, 10
+        ecall
+"""
+
+
+def test_a_key_pressed_while_the_program_runs(told, tmp_path):
+    """The one moment a key matters: a program is RUNNING and polling for it. So
+    it does not wait in the queue of work - which is not looked at again until the
+    movement ends - but in a queue of its own that the thread empties every turn.
+    """
+    with RunController(told, out=io.StringIO(), speed=500) as control:
+        opened(control, tmp_path, WAITS_FOR_A_KEY, bus=DeviceBus([make("lab")]))
+        control.carry_on()
+        assert waited_for(lambda: control.state == RUNNING)
+        control.press("lab", 1)
+        assert control.settled(20)
+    assert told.last.state == ENDED  # the program saw the key and ended
+    answers = [one for one in told.answers if one.what == DEVICE]
+    assert answers and answers[-1].value.looks["key"] == 1
+
+
+def test_a_key_pressed_while_nothing_is_happening(control, told, tmp_path):
+    """The thread may be sitting on the queue of work with nothing to do, so a
+    nudge goes through that queue as well."""
+    opened(control, tmp_path, bus=DeviceBus([make("lab")]))
+    control.press("lab", 2)
+    assert control.settled()
+    answers = [one for one in told.answers if one.what == DEVICE]
+    assert len(answers) == 1
+    assert answers[0].value.state["key down"] == 2
+
+
+def test_a_key_that_cannot_be_pressed_while_the_program_runs(told, tmp_path):
+    """A press is done IN the loop of the run, so one that cannot be done must be
+    caught there: an error let out of that would end the movement and take the run
+    with it."""
+    with RunController(told, out=io.StringIO(), speed=500) as control:
+        opened(control, tmp_path, WAITS_FOR_A_KEY, bus=DeviceBus([make("lab")]))
+        control.carry_on()
+        assert waited_for(lambda: control.state == RUNNING)
+        control.press("keyboard", 1)  # nothing of that name is attached
+        assert waited_for(lambda: bool(told.failures))
+        assert control.state == RUNNING  # and the run is none the worse
+        control.press("lab", 1)
+        assert control.settled(20)
+    assert told.last.state == ENDED
+    assert [one.what for one in told.failures] == [DEVICE]
+
+
+def test_a_key_of_a_device_nobody_attached(control, told, tmp_path):
+    """It comes back as a question that could not be answered, like any other, and
+    the thread of the run is none the worse for it."""
+    opened(control, tmp_path)
+    control.press("lab", 0)
+    assert control.settled()
+    assert [one.what for one in told.failures] == [DEVICE]
+    assert "no device of that name" in told.failures[0].message
+    control.step()
+    assert control.settled()
+    assert told.last.instructions == 1
 
 
 # ------------------------------------------------------------- the snapshots

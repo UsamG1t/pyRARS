@@ -795,6 +795,31 @@ class Session:
                 return seen
         raise ValueError(f'"{name}": no device of that name is attached')
 
+    def press(self, name: str, key: int) -> DeviceSeen:
+        """Press a key of a device, as somebody standing at the machine would.
+
+        This is the world outside reaching IN - the other way from everything else
+        here - and it is no step of the machine: the journal knows nothing of it,
+        exactly as `set` and `poke` are not steps either (the rule of the journal,
+        stage 21). A key of the digital lab that is already down goes up instead,
+        because the keys of that lab are buttons that stay down; that is the
+        device's own doing and not this method's.
+        """
+        part = self._attached(name)
+        pressing = getattr(part, "press", None)
+        if pressing is None:
+            raise ValueError(f'"{name}": that device has no keys to press')
+        pressing(key)
+        return self.device(name)
+
+    def _attached(self, name: str):
+        """The device of a name, as the object it is - for the few things that are
+        done TO a device rather than read off it."""
+        for part in self.bus.parts if self.bus is not None else ():
+            if part.name == name:
+                return part
+        raise ValueError(f'"{name}": no device of that name is attached')
+
     def cache_lines(self) -> list[CacheLine]:
         """The blocks the caches hold."""
         if self.models.caches is None:

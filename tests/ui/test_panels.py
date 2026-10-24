@@ -191,6 +191,80 @@ def test_a_bitmap_with_nothing_in_it_paints_nothing(gtk):
 # ------------------------------------------------------- the panels themselves
 
 
+def test_what_is_at_a_place_of_a_picture(gtk):
+    """A click is answered by looking through the parts BACKWARDS, because the last
+    drawn is the one on top; and only what the picture gave a name to answers at
+    all."""
+    from pyrars.ui.canvas import MARGIN, Canvas
+    from pyrars.ui.drawing import Part, Picture
+
+    heard = []
+    made = Canvas(pressed=heard.append)
+    made.show(Picture(100.0, 100.0, (
+        Part(0.0, 0.0, 40.0, 20.0, fill="empty", name="key:1"),
+        Part(0.0, 0.0, 40.0, 20.0, fill="lit", name="key:2"),  # drawn over it
+        Part(50.0, 0.0, 40.0, 20.0, fill="empty"),  # and this one has no name
+        Part(50.0, 40.0, 40.0, 20.0, fill="empty", name="key:3"),
+        Part(50.0, 40.0, 40.0, 20.0, fill="frame"))))  # nameless, over a key
+    assert made.at(MARGIN + 2, MARGIN + 2) == "key:2"
+    assert made.at(MARGIN + 52, MARGIN + 2) == ""  # nameless: nothing to press
+    assert made.at(MARGIN + 2, MARGIN + 80) == ""  # and nothing is there at all
+    # a part with no name of its own does not stand in the way of one that has
+    assert made.at(MARGIN + 52, MARGIN + 42) == "key:3"
+    # and a click where nothing can be pressed tells nobody anything
+    made._clicked(None, 1, MARGIN + 52.0, MARGIN + 2.0)
+    assert heard == []
+    made._clicked(None, 1, MARGIN + 2.0, MARGIN + 2.0)
+    assert heard == ["key:2"]
+
+
+def test_a_key_of_the_lab_clicked_reaches_whoever_is_listening(gtk, showing,
+                                                               turning):
+    """The whole way: a click on the picture of the lab becomes the device and the
+    number of the key, for the window to hand to the thread of the run."""
+    from gi.repository import Gdk, Gtk
+
+    from pyrars.ui.devices import Panel
+
+    pressed = []
+    panel = Panel("lab", pressed=lambda device, key: pressed.append((device, key)))
+    panel.show(seen("lab", looks={"left": 0, "right": 0, "keys": 16, "key": -1,
+                                  "segments": tuple("abcdefg") + ("dot",),
+                                  "counting": False, "counter": 0, "period": 31,
+                                  "keys tell": False}))
+    showing(panel)
+    # where the sixth key is drawn, in the coordinates of the widget
+    from pyrars.ui.canvas import MARGIN
+    key = [part for part in panel.picture.picture.parts
+           if part.name == "key:6"][0]
+    panel.picture._clicked(None, 1, key.x + MARGIN + 2, key.y + MARGIN + 2)
+    assert pressed == [("lab", 6)]
+    # and a click where nothing is named presses nothing
+    panel.picture._clicked(None, 1, 0.0, 0.0)
+    assert pressed == [("lab", 6)]
+
+
+def test_only_what_the_picture_calls_a_key_is_one(gtk):
+    """The panel reads the picture's own naming and nothing else, so a part named
+    for something that is not a key presses no key."""
+    from pyrars.ui.devices import _clicked_on
+
+    assert _clicked_on("key:7") == 7
+    assert _clicked_on("key:15") == 15
+    assert _clicked_on("pad:7") is None  # named for something else
+    assert _clicked_on("key:") is None
+    assert _clicked_on("") is None
+
+
+def test_a_panel_of_a_device_with_no_keys_presses_nothing(gtk):
+    """A timer has no picture at all, so there is nothing of it to click."""
+    from pyrars.ui.devices import Panel
+
+    panel = Panel("timer", pressed=lambda device, key: 1 / 0)
+    panel.show(seen("timer", state={"clock": "wall"}))
+    assert panel.picture is None
+
+
 def test_every_device_gets_a_panel_and_the_right_one(gtk):
     """A device with a picture gets it above its table; one whose whole state is
     three numbers gets the numbers, because a drawing of a number says nothing the
@@ -232,10 +306,7 @@ def test_a_panel_says_where_its_device_answers(gtk):
                base=0xFFFF0000)
     assert panel.table.rows[0] == ("where", "0xffff0018")
     assert panel.table.rows[1] == ("size", "16 bytes")
-    assert dict(panel.table.rows)["time"] == "0x00000007"
-    panel.show(seen("timer", 0x18, 16, {"clock": "wall", "time": 7}), "dec",
-               0xFFFF0000)
-    assert dict(panel.table.rows)["time"] == "7"
+    assert dict(panel.table.rows)["time"] == "7"  # a device counts in tens
 
 
 def test_a_panel_of_a_device_that_is_not_attached_keeps_what_it_had(gtk):

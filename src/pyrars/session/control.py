@@ -60,6 +60,7 @@ ENDED = "ended"  # the run is over: a restart or a step back follows
 # The names the controller answers under, where it asks something of its own.
 LOAD = "load"
 ASKING = "asking"  # the program is waiting for a line of input
+DEVICE = "the device"  # something was done TO a device, and this is how it is now
 
 
 @dataclass(frozen=True, slots=True)
@@ -218,6 +219,11 @@ class RunController:
         self.program: AssembledProgram | None = None
         self.state = NOTHING
         self._work: queue.Queue = queue.Queue()
+        # What the world outside asks of a DEVICE - a key pressed, and whatever
+        # comes after it. It is a queue of its own because the one moment a key
+        # matters is while a program is running and waiting for it, and the queue
+        # of work is not looked at again until the movement ends.
+        self._world: queue.Queue = queue.Queue()
         self._quiet = threading.Condition()
         self._busy = False
         # Whether the thread has ended, and ended because it was told to rather
@@ -285,6 +291,18 @@ class RunController:
         thread of the run, and whatever it answers comes back as `Answer(what, ...)`.
         """
         self._queue(what, lambda: Answer(what, question(self._open())))
+
+    def press(self, name: str, key: int) -> None:
+        """A key of a device pressed, from wherever that device is shown.
+
+        It goes in the queue of the world, which the thread of the run empties
+        every turn of the loop - so a program that is RUNNING and waiting for a
+        key gets it - and a nudge goes through the queue of work as well, because
+        the thread may be sitting on that one with nothing to do. Whichever of the
+        two gets there first empties the world; the other finds it empty.
+        """
+        self._world.put((DEVICE, lambda session: session.press(name, key)))
+        self._queue(DEVICE, self._world_now)
 
     # ------------------------------------------- what does not wait for the queue
 
@@ -423,9 +441,12 @@ class RunController:
         return Answer(LOAD, program)
 
     def _turn(self, turn) -> None:
-        """Every turn of the loop, in the thread of the run: the run is held back to
-        the speed it was given, and a snapshot goes out when enough time has passed
-        since the last one, and no oftener."""
+        """Every turn of the loop, in the thread of the run: whatever the world
+        outside asked of a device is done, the run is held back to the speed it was
+        given, and a snapshot goes out when enough time has passed since the last
+        one, and no oftener."""
+        if not self._world.empty():
+            self._world_now()
         if self.speed:
             self._held_back()
         now = time.monotonic()
@@ -438,6 +459,18 @@ class RunController:
         # interpreter until it is taken from it; whoever is being told these
         # snapshots has to be able to answer a pointer while they arrive.
         time.sleep(0)
+
+    def _world_now(self) -> None:
+        """Whatever the world outside asked of a device, IN THE THREAD OF THE RUN,
+        which is the only thread that may touch one (INV-T). Each answer goes out
+        under its own name, so that whoever shows the device shows it as it now
+        is."""
+        while not self._world.empty():
+            what, doing = self._world.get()
+            try:
+                self.tell(Answer(what, doing(self._open())))
+            except Exception as problem:
+                self.tell(Failed(what, str(problem) or problem.__class__.__name__))
 
     def _watched(self) -> None:
         """Whatever is being watched, with this snapshot."""

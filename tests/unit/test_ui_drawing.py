@@ -205,6 +205,20 @@ def test_the_key_that_is_down_is_the_one_that_is_lit():
     assert "F" in [part.text for part in boxes(drawn)]  # sixteen of them, 0 to F
 
 
+def test_the_keys_of_the_lab_are_named_so_that_they_can_be_pressed():
+    """The picture says WHAT can be pressed and the widget only turns a click into
+    that name, so nothing of what is on the screen is written down twice."""
+    from pyrars.ui.drawing import KEY_PRESSED
+
+    drawn = lab_picture(lab())
+    named = [part for part in drawn.parts if part.name]
+    assert [part.name for part in named] == [f"{KEY_PRESSED}{key}"
+                                             for key in range(16)]
+    assert all(part.width and part.height for part in named)  # and each is a box
+    # nothing else of the lab is pressed: a display is read, not touched
+    assert len(named) == 16
+
+
 def test_the_counter_of_the_lab_is_a_bar_while_it_runs():
     off = lab_picture(lab())
     assert len(boxes(off, "bar")) == 0

@@ -38,6 +38,67 @@ loop:   add t1, t1, t0
 """
 WHOLE = 2 + 3 * 3 + 2 + 1 + 2  # the loop three times, `la` being two instructions
 
+# Two keys of the digital lab read as hexadecimal digits, their sum shown in
+# decimal on the two displays. The architect's own test of the lab (2026-10-22),
+# and the one program of this suite that cannot run without somebody pressing
+# something.
+LAB = """\
+.globl main
+.data
+digits: .byte   0x3f, 0x06, 0x5b, 0x4f, 0x66, 0x6d, 0x7d, 0x07, 0x7f, 0x6f
+.text
+main:   li      s0, 0xffff0010
+        la      s1, digits
+        jal     ra, key
+        mv      s2, a0
+        jal     ra, gone
+        jal     ra, key
+        add     s2, s2, a0
+        li      t0, 10
+        li      s3, 0
+tens:   blt     s2, t0, show
+        sub     s2, s2, t0
+        addi    s3, s3, 1
+        j       tens
+show:   add     t1, s1, s3
+        lbu     t1, 0(t1)
+        sb      t1, 1(s0)
+        add     t2, s1, s2
+        lbu     t2, 0(t2)
+        sb      t2, 0(s0)
+        li      a7, 10
+        ecall
+key:    li      t3, 0
+row:    li      t0, 1
+        sll     t0, t0, t3
+        sb      t0, 2(s0)
+        lbu     t1, 4(s0)
+        bne     t1, zero, which
+        addi    t3, t3, 1
+        andi    t3, t3, 3
+        j       row
+which:  srli    t1, t1, 4
+        li      t2, 0
+column: andi    t4, t1, 1
+        bne     t4, zero, found
+        srli    t1, t1, 1
+        addi    t2, t2, 1
+        j       column
+found:  slli    a0, t3, 2
+        add     a0, a0, t2
+        ret
+gone:   li      t3, 0
+empty:  li      t0, 1
+        sll     t0, t0, t3
+        sb      t0, 2(s0)
+        lbu     t1, 4(s0)
+        bne     t1, zero, gone
+        addi    t3, t3, 1
+        li      t4, 4
+        blt     t3, t4, empty
+        ret
+"""
+
 ASKS = """\
 .globl main
 .text
@@ -937,6 +998,45 @@ def test_the_cycles_of_the_pipeline_are_walked_in_the_window(gtk, tmp_path, turn
         # and the machine was carried only as far as it had to be
         counted = {row[0]: row[1] for row in made.views_of["pipeline"].rows}
         assert counted["instructions"] == "5"
+    finally:
+        made.close_up()
+
+
+def test_a_program_that_asks_for_its_numbers_by_the_keys_of_the_lab(gtk, tmp_path,
+                                                                    turning):
+    """A device may be TALKED TO and not only looked at.
+
+    The whole way through, as the architect does it by hand: the lab attached in
+    the run window, the program run, and the keys of the picture pressed - three
+    of them, because a key of that lab stays down and the second press of the same
+    key is what lets it go. Three plus five is eight, and eight is `0` on the left
+    display and `8` on the right.
+    """
+    from pyrars.session import settings as runs
+    from pyrars.ui.window import Window
+
+    (tmp_path / "main.s").write_text(LAB)
+    made = Window(files=(str(tmp_path / "main.s"),), cache=str(tmp_path / "cache"),
+                  settings=runs.Settings(devices={"lab": {}}))
+    try:
+        made.do("assemble")
+        assert turning(lambda: made.state == "standing")
+        made.do("continue")
+        assert turning(lambda: made.state == "running")
+        panel = made.panels["device:lab"]
+        for key in (3, 3, 5):  # pressed, let go, and the second one pressed
+            # as a click on the picture does it, by the name the picture gave it
+            panel.picture.pressed(f"key:{key}")
+            turning(lambda: False, 0.2)  # long enough for the program to poll
+        assert turning(lambda: made.state == "ended", 10.0)
+        assert turning(lambda: dict(panel.table.rows).get("left", "").startswith(
+            "0x3f"))
+        said = dict(panel.table.rows)
+        assert said["left"].startswith("0x3f")  # the tens: a nought
+        assert said["right"].startswith("0x7f")  # and the units: an eight
+        # and the second key is still down, because nobody let it go: the program
+        # did not need it let go, and a key of that lab stays where it is put
+        assert said["key down"] == "5"
     finally:
         made.close_up()
 

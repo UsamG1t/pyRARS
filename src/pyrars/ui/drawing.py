@@ -49,6 +49,10 @@ COLOURS = {
 STAGES = ("fetch", "decode", "execute", "memory", "write")
 INITIALS = ("IF", "ID", "EX", "ME", "WB")
 
+# What a part of a picture that can be pressed is called: this and the number of
+# the key. A device of somebody else's making would name its own.
+KEY_PRESSED = "key:"
+
 
 @dataclass(frozen=True, slots=True)
 class Part:
@@ -68,6 +72,10 @@ class Part:
     size: float = 11.0
     dim: bool = False  # a word that is there to be glanced at, not read
     line: float = 1.0  # how thick the edge is drawn
+    # What this part IS, where it is a thing that can be pressed: `key:6`. The
+    # picture says what can be pressed and the widget only turns a click into this
+    # name, so nothing of what is on the screen is written down twice.
+    name: str = ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -225,7 +233,8 @@ def lab_picture(looks) -> Picture:
     for key in range(keys):
         parts.append(Part(x + (key % 4) * KEY, (key // 4) * KEY, KEY - GAP,
                           KEY - GAP, fill="lit" if key == down else "empty",
-                          edge="frame", text=f"{key:x}".upper(), size=11.0))
+                          edge="frame", text=f"{key:x}".upper(), size=11.0,
+                          name=f"{KEY_PRESSED}{key}"))
     y = max(DIGIT[1], (keys + 3) // 4 * KEY) + GAP
     period = max(int(looks.get("period", 1)), 1)
     left = int(looks.get("counter", 0))
