@@ -229,7 +229,8 @@ def test_a_key_of_the_lab_clicked_reaches_whoever_is_listening(gtk, showing,
     from pyrars.ui.devices import Panel
 
     pressed = []
-    panel = Panel("lab", pressed=lambda device, key: pressed.append((device, key)))
+    panel = Panel("lab", doors=lambda: {
+        "press": lambda device, key: pressed.append((device, key))})
     panel.show(seen("lab", looks={"left": 0, "right": 0, "keys": 16, "key": -1,
                                   "segments": tuple("abcdefg") + ("dot",),
                                   "counting": False, "counter": 0, "period": 31,
@@ -262,7 +263,7 @@ def test_a_panel_of_a_device_with_no_keys_presses_nothing(gtk):
     """A timer has no picture at all, so there is nothing of it to click."""
     from pyrars.ui.devices import Panel
 
-    panel = Panel("timer", pressed=lambda device, key: 1 / 0)
+    panel = Panel("timer", doors=lambda: {"press": lambda device, key: 1 / 0})
     panel.show(seen("timer", state={"clock": "wall"}))
     assert panel.picture is None
 
@@ -300,6 +301,134 @@ def test_a_panel_puts_the_picture_beside_the_table(gtk):
     assert pane.get_end_child() is not None  # the table, beside it
 
 
+# ----------------------------------------- what can be DONE to a device
+
+
+def finding(widget, label: str):
+    """The button of a panel that says that, wherever it is in it."""
+    from gi.repository import Gtk
+
+    if isinstance(widget, Gtk.Button) and widget.get_label() == label:
+        return widget
+    child = widget.get_first_child()
+    while child is not None:
+        found = finding(child, label)
+        if found is not None:
+            return found
+        child = child.get_next_sibling()
+    return None
+
+
+def pressing(widget, label: str) -> bool:
+    """Press that button, and say whether there was one."""
+    found = finding(widget, label)
+    if found is not None:
+        found.emit("clicked")
+    return found is not None
+
+
+def test_a_line_typed_at_the_keyboard_and_display(gtk):
+    """A LINE, with the newline of pressing Return in it, because that is what a
+    program reading a line is waiting for - and it goes to the device AT ONCE,
+    which is the door that can lose letters (`typed`, not `fed`)."""
+    from pyrars.ui.devices import Panel
+
+    said = []
+    panel = Panel("keyboard", doors=lambda: {
+        "typed": lambda device, text: said.append((device, text))})
+    panel.typing.set_text("hello")
+    panel.typing.emit("activate")
+    assert said == [("keyboard", "hello\n")]
+    assert panel.typing.get_text() == ""  # and the line is taken away
+
+
+def test_a_file_poured_into_the_keyboard_goes_the_other_way(gtk, tmp_path):
+    """A file is read whole: the device takes a letter whenever it has room. So
+    the two are different doors, and the panel knows which is which."""
+    from pyrars.ui.devices import Panel, poured
+
+    said = []
+    panel = Panel("keyboard", doors=lambda: {
+        "fed": lambda device, text: said.append(("fed", text)),
+        "typed": lambda device, text: said.append(("typed", text))})
+    (tmp_path / "keys.txt").write_text("a file of keys\n")
+    poured(panel, str(tmp_path / "keys.txt"))  # what the dialog ends in
+    assert said == [("fed", "a file of keys\n")]
+    # and that is the button it hangs on, which says which of the two it is
+    poured = finding(panel, "Pour a file in…")
+    assert poured is not None and "nothing of it is lost" in poured.get_tooltip_text()
+
+
+def test_the_clock_of_a_timer_started_and_stopped_by_hand(gtk):
+    from pyrars.ui.devices import Panel
+
+    said = []
+    panel = Panel("timer", doors=lambda: {
+        "ticking": lambda device, on: said.append((device, on))})
+    assert pressing(panel, "Stop the clock")
+    assert pressing(panel, "Start the clock")
+    assert said == [("timer", False), ("timer", True)]
+
+
+def test_a_file_put_on_a_disk_goes_through_the_door_of_an_image(gtk, tmp_path):
+    from pyrars.ui.devices import Panel, put_on
+
+    said = []
+    panel = Panel("disk", doors=lambda: {
+        "put_on": lambda device, data: said.append((device, data))})
+    (tmp_path / "image.img").write_bytes(bytes(range(4)))
+    put_on(panel, str(tmp_path / "image.img"))  # what the dialog ends in
+    assert said == [("disk", bytes(range(4)))]
+
+
+def test_the_image_of_a_disk_is_written_where_it_was_asked_for(gtk, tmp_path):
+    """The file is chosen first and the image asked for after, because the image
+    comes back from the thread of the run and whoever gets it must know already
+    where it belongs."""
+    from pyrars.ui.devices import Panel
+
+    said = []
+    panel = Panel("disk", doors=lambda: {"said": said.append})
+    panel.wrote(b"nowhere")  # nobody asked for it: nothing is written
+    assert said == []
+    panel.writing = str(tmp_path / "disk.img")
+    panel.wrote(bytes(range(8)))
+    assert (tmp_path / "disk.img").read_bytes() == bytes(range(8))
+    assert "8 bytes written to disk.img" in said[0]
+    assert panel.writing == ""  # and it is not written twice
+    panel.wrote(b"again")
+    assert (tmp_path / "disk.img").read_bytes() == bytes(range(8))
+
+
+def test_an_image_that_cannot_be_written_is_said_and_not_thrown(gtk, tmp_path):
+    from pyrars.ui.devices import Panel
+
+    said = []
+    panel = Panel("disk", doors=lambda: {"said": said.append})
+    panel.writing = str(tmp_path / "nowhere" / "disk.img")  # no such folder
+    panel.wrote(b"abc")
+    assert said and "disk.img" in said[0]
+
+
+def test_a_file_for_a_device_that_cannot_be_read(gtk, tmp_path):
+    """Said and not thrown, as everywhere else a window reads a file."""
+    from pyrars.ui.devices import Panel, _read
+
+    said = []
+    panel = Panel("disk", doors=lambda: {"said": said.append})
+    assert _read(panel, str(tmp_path / "nothing"), binary=True) is None
+    assert said and "nothing" in said[0]
+
+
+def test_a_panel_of_a_device_nobody_can_talk_to(gtk):
+    """A bitmap display is looked at and not talked to, so there is nothing under
+    its picture."""
+    from pyrars.ui.devices import DOINGS
+
+    assert set(DOINGS) == {"keyboard", "disk", "timer"}
+    assert "lab" not in DOINGS  # its keys are IN the picture, and pressed there
+
+
 def test_a_panel_says_where_its_device_answers(gtk):
     from pyrars.ui.devices import Panel
 
@@ -327,17 +456,21 @@ def test_a_panel_of_a_device_that_is_not_attached_keeps_what_it_had(gtk):
 
 
 def test_the_display_of_the_keyboard_shows_what_the_program_wrote(gtk):
+    """And what went missing on either side of it: keys nobody read in time, and
+    characters the display was too busy to show. Both are the thing this device
+    is there to teach, and neither can be seen unless it is counted."""
     from pyrars.ui.devices import Panel
 
     panel = Panel("keyboard")
     panel.show(seen("keyboard", 0x0, 16, {"shown": "hi"},
                     {"text": "hi there", "columns": 80, "rows": 25,
-                     "queued": 2, "lost": 1, "busy": False}))
+                     "queued": 2, "lost": 1, "dropped": 3, "busy": False}))
     buffer = panel.picture.view.get_buffer()
     said = buffer.get_text(buffer.get_start_iter(), buffer.get_end_iter(), False)
     assert said.startswith("hi there")
     assert "2 keys typed and not read yet" in said
     assert "1 keys lost" in said
+    assert "3 characters lost: the display was busy" in said
 
 
 def test_the_lab_is_drawn_from_the_numbers_it_reports(gtk):

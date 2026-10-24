@@ -18,8 +18,8 @@ gi.require_version("Adw", "1")
 from gi.repository import Adw, Gio, GLib, Gtk  # noqa: E402 - after require_version
 
 from pyrars.session.control import (  # noqa: E402
-    ASKING, DEVICE, ENDED, LOAD, NOTHING, RUNNING, STANDING, WAITING, Answer,
-    Failed, RunController, Snapshot)
+    ASKING, DEVICE, ENDED, IMAGE, LOAD, NOTHING, RUNNING, STANDING, WAITING,
+    Answer, Failed, RunController, Snapshot)
 from pyrars.session import project as projects  # noqa: E402
 from pyrars.session import settings as runs  # noqa: E402
 from pyrars.session.project import Project  # noqa: E402
@@ -415,7 +415,7 @@ class Window(Adw.ApplicationWindow):
         if name not in self.panels:
             if name.startswith(_DEVICE):
                 self.panels[name] = devices.Panel(name[len(_DEVICE):],
-                                                  pressed=self._key_pressed)
+                                                  doors=self._doors)
             else:
                 self.panels[name] = _side_by_side(
                     _scrolled(self.pictures[name]), self.views_of[name])
@@ -684,6 +684,9 @@ class Window(Adw.ApplicationWindow):
             elif event.what == DEVICE:
                 self._device_shown(event.value)
                 return GLib.SOURCE_REMOVE
+            elif event.what == IMAGE:
+                self._image_came(event.value)
+                return GLib.SOURCE_REMOVE
             self._said(f"{event.what}: {_short(event.value)}")
         elif isinstance(event, Failed):
             self._said(f"{event.what} failed: {event.message}")
@@ -787,21 +790,36 @@ class Window(Adw.ApplicationWindow):
         self.views_of["floats"].show(shown.floats(values["floats"], self.format))
         self.views_of["control"].show(shown.control(values["control"], self.format))
 
-    def _key_pressed(self, device: str, key: int) -> None:
-        """A key of a device was pressed on the screen.
+    def _doors(self) -> dict:
+        """The ways of doing something TO a device, for the panels to use.
 
-        It is the world outside reaching into the machine, so it goes to the thread
-        of the run like everything else, and it does not wait for a movement to end
-        - a program that is running and asking for a key is exactly when it
-        matters. What comes back is the device as it now is.
+        They are the controller's own methods: everything a person does to a device
+        is the world outside reaching into the machine, so it goes to the thread of
+        the run like everything else and does not wait for a movement to end - a
+        program that is running and asking for a key is exactly when it matters.
+        What comes back is the device as it now is.
+
+        `said` is the one that goes nowhere near a device: it is how a panel says
+        something in the messages of this window - that a file could not be read,
+        that an image was written.
         """
-        self.control.press(device, key)
+        return {"press": self.control.press, "typed": self.control.typed,
+                "fed": self.control.fed, "put_on": self.control.put_on,
+                "image_of": self.control.image_of, "ticking": self.control.ticking,
+                "said": self._said}
 
     def _device_shown(self, seen) -> None:
         """One device, after something was done to it."""
         panel = self.panels.get(f"{_DEVICE}{seen.name}")
         if panel is not None:
             panel.show(seen, self.mmio_base)
+
+    def _image_came(self, kept) -> None:
+        """What a device was holding, asked for so that it could be written: the
+        panel that asked knows where it belongs."""
+        panel = self.panels.get(f"{_DEVICE}{kept.name}")
+        if panel is not None:
+            panel.wrote(kept.data)
 
     def _shown_now(self, values: dict) -> None:
         """The views of the page that is open, from what the session answered.

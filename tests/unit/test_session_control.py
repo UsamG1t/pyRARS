@@ -63,6 +63,27 @@ main:   li a7, 8
 """
 BROKEN = ".text\nmain: nonsense t0, t1\n"
 
+# The same program as `ECHOES` with a hundred instructions of work after every
+# letter: now the hand types faster than the program asks.
+SLOWLY = """\
+.globl main
+.text
+main:   li      s0, 0xffff0000
+wait:   lw      t0, 0(s0)
+        andi    t0, t0, 1
+        beq     t0, zero, wait
+        lw      t1, 4(s0)
+        li      t2, 10
+        beq     t1, t2, done
+        sw      t1, 12(s0)
+        li      t3, 50
+work:   addi    t3, t3, -1
+        bne     t3, zero, work
+        j       wait
+done:   li      a7, 10
+        ecall
+"""
+
 # Two to set up, three to a turn of the loop three times over, the call, the two
 # halves of `la` with the store and the return, and two before the exit; the
 # `ecall` that ends the run does not count.
@@ -574,6 +595,132 @@ def test_a_key_that_cannot_be_pressed_while_the_program_runs(told, tmp_path):
         assert control.settled(20)
     assert told.last.state == ENDED
     assert [one.what for one in told.failures] == [DEVICE]
+
+
+# A program that reads keys from the keyboard and shows them on its display until
+# it is given a newline, and does NOTHING else in between: it asks for a key
+# oftener than any hand types.
+ECHOES = """\
+.globl main
+.text
+main:   li      s0, 0xffff0000
+wait:   lw      t0, 0(s0)       # is a key waiting?
+        andi    t0, t0, 1
+        beq     t0, zero, wait
+        lw      t1, 4(s0)       # the key, which reading clears
+        li      t2, 10
+        beq     t1, t2, done
+        sw      t1, 12(s0)      # and onto the display with it
+        j       wait
+done:   li      a7, 10
+        ecall
+"""
+
+
+def test_a_program_that_asks_oftener_than_a_hand_types_loses_nothing(told,
+                                                                    tmp_path):
+    """A line typed at the device is typed OUT by it, a letter every so many
+    instructions, as a hand does (the architect, 2026-10-26). A program that does
+    nothing but ask for keys is there before every letter."""
+    with RunController(told, out=io.StringIO()) as control:
+        opened(control, tmp_path, ECHOES,
+               bus=DeviceBus([make("keyboard", delay=1)]))
+        control.carry_on()
+        assert waited_for(lambda: control.state == RUNNING)
+        control.typed("keyboard", "hi there\n")
+        assert control.settled(20)
+        looks = control.session.device("keyboard").looks
+    assert told.last.state == ENDED  # the newline came last and ended it
+    assert (looks["lost"], looks["text"]) == (0, "hi there")
+
+
+def test_a_program_that_works_between_asking_loses_the_letters_between(told,
+                                                                      tmp_path):
+    """And THIS is what the device is for: the hand goes on typing whether anybody
+    is asking or not.
+
+    The program does about a hundred instructions of work after every letter it
+    reads, and the hand types one every twenty-five, so three letters pass
+    unasked-for between one reading and the next. Of `hi there` it reads the `h`,
+    then the `h` of `there` - the letter that happened to be in the register when
+    it next looked - and then the newline, which ends it; six letters are gone and
+    counted. Nothing of this is chance: the hand is counted in INSTRUCTIONS, so
+    the same program loses the same letters every time (INV-D).
+    """
+    with RunController(told, out=io.StringIO()) as control:
+        opened(control, tmp_path, SLOWLY,
+               bus=DeviceBus([make("keyboard", delay=1)]))
+        control.carry_on()
+        assert waited_for(lambda: control.state == RUNNING)
+        control.typed("keyboard", "hi there\n")
+        assert control.settled(20)
+        looks = control.session.device("keyboard").looks
+    assert told.last.state == ENDED
+    assert (looks["lost"], looks["text"]) == (6, "hh")
+
+
+def test_a_hand_that_types_slower_loses_nothing_to_the_same_program(told,
+                                                                   tmp_path):
+    """The other side of the same comparison, and the reason `typing` is an option:
+    a hand slower than the program's work loses it nothing."""
+    with RunController(told, out=io.StringIO()) as control:
+        opened(control, tmp_path, SLOWLY,
+               bus=DeviceBus([make("keyboard", delay=1, typing=200)]))
+        control.carry_on()
+        assert waited_for(lambda: control.state == RUNNING)
+        control.typed("keyboard", "hi there\n")
+        assert control.settled(20)
+        looks = control.session.device("keyboard").looks
+    assert told.last.state == ENDED
+    assert (looks["lost"], looks["text"]) == (0, "hi there")
+
+
+def test_a_file_poured_into_a_keyboard_of_one_key_loses_nothing(told, tmp_path):
+    """The other way, and what it is for: a file prepared beforehand is taken a
+    letter at a time, whenever the keyboard has room, so a program reads the whole
+    of it however seldom it asks."""
+    with RunController(told, out=io.StringIO()) as control:
+        opened(control, tmp_path, ECHOES,
+               bus=DeviceBus([make("keyboard", delay=1)]))
+        control.carry_on()
+        assert waited_for(lambda: control.state == RUNNING)
+        control.fed("keyboard", "hi there\n")
+        assert control.settled(20)
+        looks = control.session.device("keyboard").looks
+    assert told.last.state == ENDED
+    assert (looks["lost"], looks["text"]) == (0, "hi there")
+
+
+def test_an_image_asked_of_a_device_answers_under_its_own_name(control, told,
+                                                               tmp_path):
+    """It answers with the BYTES of an image and not with the state of a device,
+    so it is told apart from everything else that is done to one."""
+    from pyrars.session.control import IMAGE
+
+    opened(control, tmp_path,
+           bus=DeviceBus([make("disk", blocks=2, block_size=8)]))
+    control.put_on("disk", bytes(range(16)))
+    control.image_of("disk")
+    assert control.settled()
+    kept = [one for one in told.answers if one.what == IMAGE]
+    assert len(kept) == 1
+    assert (kept[0].value.name, kept[0].value.data) == ("disk", bytes(range(16)))
+
+
+def test_a_clock_stopped_by_hand_while_the_program_runs(told, tmp_path):
+    """The one thing a program cannot tell from the inside: the time standing
+    still."""
+    with RunController(told, out=io.StringIO(), speed=2000) as control:
+        opened(control, tmp_path, FOREVER, bus=DeviceBus([make("timer")]))
+        control.carry_on()
+        assert waited_for(lambda: control.state == RUNNING)
+        control.ticking("timer", False)
+        assert waited_for(lambda: any(
+            one.what == DEVICE and one.value.state["running"] is False
+            for one in told.answers))
+        control.stop()
+        assert control.settled()
+    assert control.session.device("timer").state["running"] is False
 
 
 def test_a_key_of_a_device_nobody_attached(control, told, tmp_path):

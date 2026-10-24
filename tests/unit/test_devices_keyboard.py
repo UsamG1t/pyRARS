@@ -143,13 +143,25 @@ def test_a_character_appears_when_the_delay_is_over():
     assert register(machine, TRANSMITTER_CONTROL) == READY
 
 
-def test_a_character_written_while_the_display_is_busy_is_lost():
+def test_a_character_written_while_the_display_is_busy_is_lost_and_counted():
+    """The other half of the lesson of this device: a program that writes faster
+    than the display shows loses what it wrote, exactly as one that reads slower
+    than a hand types loses what was typed. RARS drops it in the same way and
+    counts nothing, having no counter at all (the architect, 2026-10-26)."""
     machine, device = keyboard(delay=2)
     put(machine, TRANSMITTER_DATA, ord("A"))
+    assert device.dropped == 0
     put(machine, TRANSMITTER_DATA, ord("B"))
     assert register(machine, TRANSMITTER_DATA) == ord("B")  # the cell took it
     tick(device, 3)
     assert device.shown() == "A"  # but the display never heard of it
+    assert device.dropped == 1
+    assert device.looks()["dropped"] == 1
+    assert device.state()["characters lost"] == 1
+    # and one written when it is ready again is not lost at all
+    put(machine, TRANSMITTER_DATA, ord("C"))
+    tick(device, 3)
+    assert (device.shown(), device.dropped) == ("AC", 1)
 
 
 def test_the_display_asks_for_attention_only_where_the_program_said_so():
@@ -376,7 +388,72 @@ def test_a_keyboard_of_one_key_keeps_the_last_as_rars_does():
     machine, device = keyboard(queue=1)
     device.type_key("a")
     device.type_key("b")
-    assert (device.keys, device.lost) == ([], 0)
+    assert device.keys == []
+    assert register(machine, RECEIVER_DATA) == ord("b")
+    # and the one that was overwritten is COUNTED. RARS overwrites it the same way
+    # and counts nothing, having no counter at all; ours is how anybody watching
+    # sees what this device is for - that a program polling now and then misses
+    # what was typed in between (2026-10-26)
+    assert device.lost == 1
+    assert device.looks()["lost"] == 1
+
+
+def test_a_fresh_run_has_lost_nothing_yet():
+    """What was lost belongs to the run it was lost in: a restart puts a device
+    back where it began (the rule of stage 21), counters and all."""
+    machine, device = keyboard(delay=2, typing=1)
+    put(machine, TRANSMITTER_DATA, ord("A"))
+    put(machine, TRANSMITTER_DATA, ord("B"))  # dropped by the display
+    device.type_out("xy")
+    tick(device, 2)  # and one key lost to the other
+    assert (device.dropped, device.lost) > (0, 0)
+    device.reset()
+    assert (device.dropped, device.lost) == (0, 0)
+
+
+def test_a_hand_types_a_letter_every_so_many_instructions():
+    """Which is what a line typed at the device means, and what the device is for:
+    the hand goes on whether anybody is asking or not (the architect,
+    2026-10-26)."""
+    machine, device = keyboard(typing=4)
+    device.type_out("abc")
+    assert device.state()["being typed"] == 3
+    tick(device, 3)
+    assert register(machine, RECEIVER_CONTROL) & READY == 0  # not yet
+    tick(device, 1)
+    assert register(machine, RECEIVER_DATA) == ord("a")  # as a program reads it
+    tick(device, 4)
+    assert register(machine, RECEIVER_DATA) == ord("b")
+    assert (device.lost, device.state()["being typed"]) == (0, 1)
+
+
+def test_a_hand_that_gets_ahead_of_the_program_loses_the_letters_between():
+    machine, device = keyboard(typing=1)
+    device.type_out("abcd")
+    tick(device, 4)  # four letters typed and not one of them read
+    assert device.lost == 3
+    assert register(machine, RECEIVER_DATA) == ord("d")
+    assert device.looks()["being typed"] == 0
+
+
+def test_a_hand_is_counted_in_instructions_and_not_in_time():
+    """So the same program loses the same letters twice over (INV-D), and nothing
+    is typed while the machine stands still - there is nothing to count."""
+    machine, device = keyboard(typing=2)
+    device.type_out("ab")
+    assert register(machine, RECEIVER_CONTROL) & READY == 0
+    tick(device, 1)
+    assert register(machine, RECEIVER_CONTROL) & READY == 0  # one is not two
+    tick(device, 1)
+    assert register(machine, RECEIVER_DATA) == ord("a")
+
+
+def test_a_key_read_before_the_next_is_typed_is_lost_by_nobody():
+    machine, device = keyboard(queue=1)
+    device.type_key("a")
+    assert register(machine, RECEIVER_DATA) == ord("a")  # as a program reads it
+    device.type_key("b")
+    assert device.lost == 0  # nothing was overwritten: it had been read
     assert register(machine, RECEIVER_DATA) == ord("b")
 
 

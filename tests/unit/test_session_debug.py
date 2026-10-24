@@ -611,6 +611,136 @@ def test_a_key_of_a_device_pressed_from_outside(tmp_path):
     assert s.press("lab", 6).looks["key"] == -1
 
 
+def test_a_text_typed_at_a_device_is_taken_a_letter_at_a_time(tmp_path):
+    """A LINE typed into a window, and not a key pushed at the device: a keyboard
+    that holds one key would lose all of a line but its last letter if they were
+    pushed at it together. Fed, it takes a letter whenever the program has read
+    the one before."""
+    from pyrars.devices.keyboard import RECEIVER_DATA
+    from pyrars.isa.memory import DEFAULT
+
+    s = session(SUM, tmp_path, bus=DeviceBus([make("keyboard")]))
+    seen = s.fed("keyboard", "hi")
+    assert seen.name == "keyboard"
+    where = DEFAULT.mmio_base + RECEIVER_DATA
+    s.step(1)  # the keyboard takes a key when it has room, on any instruction
+    assert s.device("keyboard").state["key waiting"] is True
+    assert s.machine.memory.read(where, 4) == ord("h")  # as a program reads it
+    s.step(1)
+    assert s.machine.memory.read(where, 4) == ord("i")
+
+
+def test_a_line_typed_at_a_device_is_typed_out_as_a_hand_would(tmp_path):
+    """A letter every so many instructions, and not all at once: so a line typed
+    while the machine stands still waits, and arrives as the program runs (the
+    architect, 2026-10-26)."""
+    from pyrars.devices.keyboard import RECEIVER_DATA
+    from pyrars.isa.memory import DEFAULT
+
+    s = session(SUM, tmp_path, bus=DeviceBus([make("keyboard", typing=4)]))
+    seen = s.typed("keyboard", "abc")
+    assert seen.state["being typed"] == 3  # a hand with three letters still to go
+    where = DEFAULT.mmio_base + RECEIVER_DATA
+    s.step(3)
+    assert s.device("keyboard").state["key waiting"] is False  # not yet
+    s.step(1)  # the fourth instruction: the first letter
+    assert s.machine.memory.read(where, 4) == ord("a")
+    s.step(4)
+    assert s.machine.memory.read(where, 4) == ord("b")
+    assert s.device("keyboard").state["being typed"] == 1
+    assert s.device("keyboard").looks["lost"] == 0  # it was read in time, each one
+
+
+def test_a_program_that_asks_too_seldom_loses_the_letters_between(tmp_path):
+    """The whole lesson of the device: a hand goes on typing whether anybody is
+    asking or not, and what nobody asked for in time is gone - and counted."""
+    s = session(SUM, tmp_path, bus=DeviceBus([make("keyboard", typing=1)]))
+    s.typed("keyboard", "abcd")
+    s.step(4)  # four letters typed and not one of them read
+    assert s.device("keyboard").looks["lost"] == 3
+    assert s.device("keyboard").state["being typed"] == 0
+
+
+def test_a_hand_that_was_typing_is_not_still_typing_after_a_restart(tmp_path):
+    s = session(SUM, tmp_path, bus=DeviceBus([make("keyboard", typing=100)]))
+    s.typed("keyboard", "abc")
+    s.restart()
+    assert s.device("keyboard").state["being typed"] == 0
+
+
+def test_what_is_typed_waits_its_turn_behind_what_was_typed_before(tmp_path):
+    """A second line typed while the program is still reading the first does not
+    take its place: what is owed is kept by the session, because the device takes
+    one letter at a time and whoever types does not."""
+    s = session(SUM, tmp_path, bus=DeviceBus([make("keyboard")]))
+    s.fed("keyboard", "a")
+    s.fed("keyboard", "b")  # the second behind the first, not in its place
+    from pyrars.devices.keyboard import RECEIVER_DATA
+    from pyrars.isa.memory import DEFAULT
+
+    where = DEFAULT.mmio_base + RECEIVER_DATA
+    s.step(1)
+    assert s.machine.memory.read(where, 4) == ord("a")
+    s.step(1)
+    assert s.machine.memory.read(where, 4) == ord("b")
+
+
+def test_a_run_that_begins_again_owes_nothing_that_was_typed(tmp_path):
+    """A restart is a fresh run (the decision of 2026-10-21), and a program that
+    asks for a letter asks the person again."""
+    from pyrars.devices.keyboard import RECEIVER_DATA
+    from pyrars.isa.memory import DEFAULT
+
+    s = session(SUM, tmp_path, bus=DeviceBus([make("keyboard")]))
+    s.fed("keyboard", "abc")
+    s.restart()
+    s.step(2)
+    assert s.device("keyboard").state["key waiting"] is False
+    assert s.machine.memory.read(DEFAULT.mmio_base + RECEIVER_DATA, 4) == 0
+
+
+def test_an_image_put_on_a_disk_and_taken_off_it(tmp_path):
+    s = session(SUM, tmp_path,
+                bus=DeviceBus([make("disk", blocks=2, block_size=8)]))
+    held = bytes(range(16))
+    seen = s.put_on("disk", held)
+    assert seen.name == "disk"
+    kept = s.image_of("disk")
+    assert (kept.name, kept.data) == ("disk", held)
+
+
+def test_an_image_of_the_wrong_size_says_what_the_device_says(tmp_path):
+    """The size is the device's own, so the device is the one that says it."""
+    s = session(SUM, tmp_path,
+                bus=DeviceBus([make("disk", blocks=2, block_size=8)]))
+    with pytest.raises(ValueError, match="an image of 3 bytes for a disk of 16"):
+        s.put_on("disk", b"abc")
+
+
+def test_the_clock_of_a_device_started_and_stopped_by_hand(tmp_path):
+    """Which is what the timer of RARS lets one do, and what shows a program
+    reading a time that does not move."""
+    s = session(SUM, tmp_path, bus=DeviceBus([make("timer")]))
+    assert s.device("timer").state["running"] is True
+    assert s.ticking("timer", False).state["running"] is False
+    assert s.ticking("timer", True).state["running"] is True
+
+
+def test_what_a_device_will_not_be_asked_to_do(tmp_path):
+    """Every one of them says what it is in the same shape."""
+    s = session(SUM, tmp_path, bus=DeviceBus([make("timer"), make("lab")]))
+    with pytest.raises(ValueError, match="takes no text to type"):
+        s.fed("timer", "hi")
+    with pytest.raises(ValueError, match="holds no image"):
+        s.put_on("lab", b"")
+    with pytest.raises(ValueError, match="holds no image"):
+        s.image_of("timer")
+    with pytest.raises(ValueError, match="no clock to start or stop"):
+        s.ticking("lab", True)
+    with pytest.raises(ValueError, match="no keys to press"):
+        s.press("timer", 0)
+
+
 def test_pressing_a_key_is_no_step_of_the_machine(tmp_path):
     """The journal knows nothing of it, exactly as `set` and `poke` are not steps
     either (the rule of the journal)."""

@@ -1147,6 +1147,119 @@ def test_a_program_that_asks_for_its_numbers_by_the_keys_of_the_lab(gtk, tmp_pat
         made.close_up()
 
 
+def test_every_door_a_panel_asks_for_is_one_the_window_hands_over(window):
+    """The panels name the doors they use and the window names the doors it gives.
+    This reads the first list off the module itself, so neither can quietly grow
+    past the other."""
+    import inspect
+    import re
+
+    from pyrars.ui import devices
+
+    asked = set(re.findall(r'door\("(\w+)"\)', inspect.getsource(devices)))
+    assert asked == {"press", "typed", "fed", "put_on", "image_of", "ticking",
+                     "said"}
+    assert asked <= set(window._doors())
+
+
+def test_a_line_typed_at_the_keyboard_can_be_lost_and_says_so(gtk, tmp_path,
+                                                              turning):
+    """The whole way, as somebody at the window does it - and the thing the device
+    is FOR (the architect, 2026-10-26).
+
+    The keyboard types the line out as a HAND does, a letter every so many
+    instructions, and this program does a hundred instructions of work after every
+    letter it reads. So the hand gets ahead of it: three letters pass unasked-for
+    between one reading and the next, and the panel says how many went that way. A
+    line that could not be lost would teach the opposite of what this device
+    teaches.
+    """
+    from pyrars.session import settings as runs
+    from pyrars.ui.window import Window
+
+    # reads keys and shows them until a newline, with work in between
+    (tmp_path / "main.s").write_text(
+        ".globl main\n.text\n"
+        "main:  li      s0, 0xffff0000\n"
+        "wait:  lw      t0, 0(s0)\n       andi    t0, t0, 1\n"
+        "       beq     t0, zero, wait\n"
+        "       lw      t1, 4(s0)\n       li      t2, 10\n"
+        "       beq     t1, t2, done\n       sw      t1, 12(s0)\n"
+        "       li      t3, 50\n"
+        "work:  addi    t3, t3, -1\n       bne     t3, zero, work\n"
+        "       j       wait\n"
+        "done:  li      a7, 10\n       ecall\n")
+    made = Window(files=(str(tmp_path / "main.s"),), cache=str(tmp_path / "cache"),
+                  settings=runs.Settings(devices={"keyboard": {"delay": 1}}))
+    try:
+        made.do("assemble")
+        assert turning(lambda: made.state == "standing")
+        looking(made, "device:keyboard")
+        made.do("continue")
+        assert turning(lambda: made.state == "running")
+        panel = made.panels["device:keyboard"]
+        panel.typing.set_text("hi there")
+        panel.typing.emit("activate")
+        # the newline came last and is the one it read, so the program ends
+        assert turning(lambda: made.state == "ended", 10.0)
+        said = panel.picture.view.get_buffer()
+        shown_now = said.get_text(said.get_start_iter(), said.get_end_iter(), False)
+        assert "6 keys lost" in shown_now  # and the panel says where they went
+        assert shown_now.startswith("hh")  # the two it did catch, and no more
+        assert turning(lambda: dict(panel.table.rows).get("keys lost") == "6")
+    finally:
+        made.close_up()
+
+
+def test_a_file_put_on_a_disk_and_written_back(gtk, tmp_path, turning):
+    """What the command line does with `--device disk:file=...`, in a window: the
+    file goes on by hand and comes off by hand. Nothing is written to anybody's
+    disk unasked (the architect's decision, 2026-10-25)."""
+    from pyrars.session import settings as runs
+    from pyrars.ui.window import Window
+
+    (tmp_path / "main.s").write_text(SUM)
+    (tmp_path / "image.img").write_bytes(bytes(range(16)))
+    made = Window(files=(str(tmp_path / "main.s"),), cache=str(tmp_path / "cache"),
+                  settings=runs.Settings(devices={"disk": {"blocks": 2,
+                                                           "block_size": 8}}))
+    try:
+        made.do("assemble")
+        assert turning(lambda: made.state == "standing")
+        looking(made, "device:disk")
+        panel = made.panels["device:disk"]
+        made.control.put_on("disk", (tmp_path / "image.img").read_bytes())
+        assert turning(lambda: True, 0.2)
+        # and off it again, to where it was asked to go
+        panel.writing = str(tmp_path / "back.img")
+        made.control.image_of("disk")
+        assert turning(lambda: (tmp_path / "back.img").exists())
+        assert (tmp_path / "back.img").read_bytes() == bytes(range(16))
+        assert "16 bytes written to back.img" in shown(made.messages)
+    finally:
+        made.close_up()
+
+
+def test_an_image_the_disk_will_not_take(gtk, tmp_path, turning):
+    """The size is the device's own, so the device is the one that says it - and
+    the window says what the device said."""
+    from pyrars.session import settings as runs
+    from pyrars.ui.window import Window
+
+    (tmp_path / "main.s").write_text(SUM)
+    made = Window(files=(str(tmp_path / "main.s"),), cache=str(tmp_path / "cache"),
+                  settings=runs.Settings(devices={"disk": {"blocks": 2,
+                                                           "block_size": 8}}))
+    try:
+        made.do("assemble")
+        assert turning(lambda: made.state == "standing")
+        made.control.put_on("disk", b"too short")
+        assert turning(lambda: "an image of 9 bytes for a disk of 16"
+                       in shown(made.messages))
+    finally:
+        made.close_up()
+
+
 def test_a_run_that_cannot_be_set_up_is_said_and_nothing_is_assembled(gtk, tmp_path,
                                                                       turning):
     """The settings are given to the machine at the Assemble, so this is where

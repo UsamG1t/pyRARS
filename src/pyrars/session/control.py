@@ -80,6 +80,7 @@ ENDED = "ended"  # the run is over: a restart or a step back follows
 LOAD = "load"
 ASKING = "asking"  # the program is waiting for a line of input
 DEVICE = "the device"  # something was done TO a device, and this is how it is now
+IMAGE = "the image"  # and what a device was holding, for whoever asked for it
 
 
 @dataclass(frozen=True, slots=True)
@@ -334,14 +335,45 @@ class RunController:
     def press(self, name: str, key: int) -> None:
         """A key of a device pressed, from wherever that device is shown.
 
-        It goes in the queue of the world, which the thread of the run empties
-        every turn of the loop - so a program that is RUNNING and waiting for a
-        key gets it - and a nudge goes through the queue of work as well, because
-        the thread may be sitting on that one with nothing to do. Whichever of the
-        two gets there first empties the world; the other finds it empty.
+        This and the four below it go in the queue of the world, which the thread
+        of the run empties every turn of the loop - so a program that is RUNNING
+        and waiting for a key gets it - and a nudge goes through the queue of work
+        as well, because the thread may be sitting on that one with nothing to do.
+        Whichever of the two gets there first empties the world; the other finds it
+        empty.
         """
-        self._world.put((DEVICE, lambda session: session.press(name, key)))
-        self._queue(DEVICE, self._world_now)
+        self._to_the_world(DEVICE, lambda session: session.press(name, key))
+
+    def typed(self, name: str, text: str) -> None:
+        """A text typed at a device AT ONCE, as a hand at a keyboard does it: what
+        the program has not read in time is lost, which is the thing a keyboard of
+        one key is there to show."""
+        self._to_the_world(DEVICE, lambda session: session.typed(name, text))
+
+    def fed(self, name: str, text: str) -> None:
+        """A file of keys for a device to take from as it has room, which loses
+        nothing: what a command line gives a keyboard."""
+        self._to_the_world(DEVICE, lambda session: session.fed(name, text))
+
+    def put_on(self, name: str, data: bytes) -> None:
+        """An image onto a device that holds one: a file onto a disk."""
+        self._to_the_world(DEVICE, lambda session: session.put_on(name, data))
+
+    def image_of(self, name: str) -> None:
+        """What a device is holding, to be written somewhere. It answers under a
+        name of its own, because it answers with the BYTES of an image and not with
+        the state of a device."""
+        self._to_the_world(IMAGE, lambda session: session.image_of(name))
+
+    def ticking(self, name: str, on: bool) -> None:
+        """Start or stop the clock of a device by hand."""
+        self._to_the_world(DEVICE, lambda session: session.ticking(name, on))
+
+    def _to_the_world(self, what: str, doing) -> None:
+        """Something to be done to a device, in the queue of the world and with a
+        nudge through the queue of work besides."""
+        self._world.put((what, doing))
+        self._queue(what, self._world_now)
 
     # ------------------------------------------- what does not wait for the queue
 

@@ -21,6 +21,7 @@ A change made by `set` or `poke` is not a step of the machine, so a step back do
 not undo it; the answer of the command says so (the rule of the journal, stage 21).
 """
 
+from collections import deque
 from dataclasses import dataclass, field, fields, replace
 
 from pyrars.analysis.cache import Caches
@@ -200,6 +201,15 @@ class FrameSeen:
 
 
 @dataclass(frozen=True, slots=True)
+class Kept:
+    """What a device is HOLDING, as against what it is doing: the image of a disk,
+    for whoever means to write it somewhere."""
+
+    name: str
+    data: bytes
+
+
+@dataclass(frozen=True, slots=True)
 class DeviceSeen:
     name: str
     offset: int | None
@@ -374,6 +384,10 @@ class Session:
         self._ends: dict[int, object] = {}  # how to end a watch
         self._next_id = 1
         self._pending: list[tuple[int, MemAccess]] = []
+        # What has been typed at a device and not read by the program yet, by the
+        # name of the device (`fed`). It is of the SESSION and not of the device,
+        # because the device takes one letter at a time and whoever types does not.
+        self._typing: dict[str, deque] = {}
         self._touched: list[Touched] = []
         # Whether the run is over. A program that has exited, run off the end of
         # its text or trapped with nowhere to go does not go on, and a movement
@@ -425,6 +439,12 @@ class Session:
                          for number, watch in self._watches.items()}
         self.ended = False
         self.cycle_now = -1  # a fresh run is at no cycle of the model either
+        # And nothing typed at the last run is owed to this one. The deques are
+        # emptied and not only let go of: a device that was fed holds on to the
+        # one it was given, and would go on typing out of it.
+        for waiting in self._typing.values():
+            waiting.clear()
+        self._typing.clear()
         self._build()
         return Stopped(NOTHING, self.where())
 
@@ -798,19 +818,96 @@ class Session:
     def press(self, name: str, key: int) -> DeviceSeen:
         """Press a key of a device, as somebody standing at the machine would.
 
-        This is the world outside reaching IN - the other way from everything else
-        here - and it is no step of the machine: the journal knows nothing of it,
-        exactly as `set` and `poke` are not steps either (the rule of the journal,
-        stage 21). A key of the digital lab that is already down goes up instead,
-        because the keys of that lab are buttons that stay down; that is the
-        device's own doing and not this method's.
+        This and the four that follow are the world outside reaching IN - the other
+        way from everything else here - and none of them is a step of the machine:
+        the journal knows nothing of them, exactly as `set` and `poke` are not
+        steps either (the rule of the journal, stage 21). A key of the digital lab
+        that is already down goes up instead, because the keys of that lab are
+        buttons that stay down; that is the device's own doing and not this
+        method's.
         """
-        part = self._attached(name)
-        pressing = getattr(part, "press", None)
-        if pressing is None:
-            raise ValueError(f'"{name}": that device has no keys to press')
-        pressing(key)
+        self._able(name, "press", "that device has no keys to press")(key)
         return self.device(name)
+
+    def typed(self, name: str, text: str) -> DeviceSeen:
+        """Type at a device as a HAND does: a letter every so many instructions,
+        whether the program has read the one before or not.
+
+        This is what a line typed into a window means, and it is deliberately the
+        LOSING way (the architect, 2026-10-26). The device types the line out at
+        its own rate (`KeyboardDisplay.type_out`, which `typing` sets), and a
+        keyboard of one key - RARS's, and ours by default - holds the last letter
+        and loses the ones the program never read. So a program that does nothing
+        but ask for keys catches every letter, and one that does a little work
+        between asking loses some, and is told how many. That is the whole lesson
+        of the device: the asking is not continuous, and what nobody asked for in
+        time is gone.
+
+        `fed` is the other way, for a FILE prepared beforehand: nothing is lost
+        there, because the device takes a letter only when it has room for one.
+        """
+        self._able(name, "type_out", "that device takes no keys typed")(text)
+        return self.device(name)
+
+    def fed(self, name: str, text: str) -> DeviceSeen:
+        """Give a device a text to type from: it takes a letter whenever it has
+        room, so nothing of it is lost.
+
+        This is for a FILE of keys prepared beforehand, which is what the command
+        line gives a keyboard (`--device keyboard:keys=...`); a line typed by hand
+        goes the other way, through `typed`, where it can be lost.
+
+        What is given waits its turn behind whatever was given before and not read
+        yet, so a second file given while the program is still reading the first
+        does not take its place.
+        """
+        feeding = self._able(name, "feed", "that device takes no text to type")
+        waiting = self._typing.setdefault(name, deque())
+        waiting.extend(text)
+        feeding(lambda: waiting.popleft() if waiting else None)
+        return self.device(name)
+
+    def put_on(self, name: str, data: bytes) -> DeviceSeen:
+        """Put an image on a device that holds one: the blocks of a disk.
+
+        The device says what is wrong with an image of the wrong size, because the
+        size is the device's own (`BlockDevice.load`).
+        """
+        self._able(name, "load", "that device holds no image")(data)
+        return self.device(name)
+
+    def image_of(self, name: str) -> Kept:
+        """What a device is holding, to be written somewhere: the image of a disk.
+
+        A QUESTION and not a change, and asked for only when somebody asks: the
+        image of a disk is half a megabyte by default, and nothing of it belongs in
+        a snapshot.
+        """
+        return Kept(name, self._able(name, "saved",
+                                     "that device holds no image")())
+
+    def ticking(self, name: str, on: bool) -> DeviceSeen:
+        """Start or stop the clock of a device by hand, as the timer of RARS lets
+        one: a program that reads the time can then be shown reading a time that
+        does not move."""
+        self._able(name, "play" if on else "pause",
+                   "that device has no clock to start or stop")()
+        return self.device(name)
+
+    def _able(self, name: str, what: str, said: str):
+        """The one thing a device can be asked to DO under that name - or a word
+        about why it cannot, in the same shape for every one of them.
+
+        It must be something to call: a device may hold a FIELD of that name and
+        mean something else by it entirely (the timer keeps the time it was
+        stopped at in `saved`, where a disk answers with its image under the same
+        name), and asking a number to do something is not a question a device
+        should be troubled with.
+        """
+        doing = getattr(self._attached(name), what, None)
+        if not callable(doing):
+            raise ValueError(f'"{name}": {said}')
+        return doing
 
     def _attached(self, name: str):
         """The device of a name, as the object it is - for the few things that are

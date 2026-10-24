@@ -449,6 +449,10 @@ OF_SETTINGS: dict[str, str] = {
     "keyboard.show_after_delay": "Whether a character appears when its delay is "
                                  "over, as in RARS, rather than the moment it is "
                                  "written",
+    "keyboard.typing": "Instructions between one letter of a line typed at it and "
+                       "the next - a hand types at a rate and does not wait to be "
+                       "read. A program that asks oftener loses nothing; one that "
+                       "works longer than this between asking loses letters",
     "keyboard.queue": "How many keys typed the keyboard holds at once. One is what "
                       "RARS keeps, and a key is lost if the program did not read "
                       "the one before it",
