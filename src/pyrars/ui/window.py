@@ -7,6 +7,7 @@ about the run comes from the controller, whose events arrive from the thread of 
 run and are handed to the main loop before a widget is touched (INV-T).
 """
 
+import sys
 from pathlib import Path
 
 import gi
@@ -30,6 +31,22 @@ from pyrars.ui.project_window import ProjectWindow  # noqa: E402
 from pyrars.ui.settings_window import SettingsWindow  # noqa: E402
 from pyrars.ui.table import Table  # noqa: E402
 from pyrars.values import VALUE_FORMATS  # noqa: E402
+
+
+# How long a thread may hold the interpreter before it is offered to another.
+#
+# This is a setting of CPython itself and it is set HERE because a window is the
+# one place in this project where a GTK main loop and a thread of Python run side
+# by side, and the default is wrong for exactly that. The main loop asks for the
+# interpreter back after every call it makes into C, and with the default of five
+# milliseconds it waits that long for each of them: measured on a program painting
+# a bitmap display at full speed, the window got two turns in seven seconds and
+# the picture never appeared. At a tenth of a millisecond it got a hundred and
+# sixty-six turns in three seconds, the picture filled as the program painted it,
+# and the RUN itself went half again as fast - fifty-four thousand instructions a
+# second against thirty-five - because nothing was fighting over the interpreter
+# any more (the architect, 2026-10-25).
+SWITCH = 0.0001
 
 
 class Writing:
@@ -64,6 +81,7 @@ class Window(Adw.ApplicationWindow):
                  cache: str | None = None, where: str = "",
                  settings: runs.Settings | None = None, **kept) -> None:
         super().__init__(title="pyRARS", **kept)
+        sys.setswitchinterval(SWITCH)  # see `SWITCH`: a main loop beside a thread
         self.project = project
         # How the program is RUN, as against what it IS: the devices, the models,
         # the counting. They belong to the person rather than to the program, so
@@ -133,8 +151,13 @@ class Window(Adw.ApplicationWindow):
 
         # The controller writes from its own thread; `Writing` hands every piece to
         # the main loop, and the events go the same way through `_told`.
+        # `waits`: the thread of the run says nothing more until this window has
+        # dealt with the last snapshot. Everything a snapshot costs is paid here -
+        # tables, pictures, marks in the margin - and a machine at its own speed
+        # can say more than any window can answer for.
         self.control = RunController(self._told, out=Writing(self._printed),
-                                     errors=Writing(self._printed))
+                                     errors=Writing(self._printed), waits=True)
+        self._watching_again()
         if self.settings_wrong:
             self._said(f"the settings of the run: {self.settings_wrong}")
             self._said("running with the settings as they come")
@@ -181,23 +204,11 @@ class Window(Adw.ApplicationWindow):
         return self.how_fast
 
     def _speed_chosen(self, chooser, parameter) -> None:
-        """A speed, now and for the run that is already going.
-
-        While a run is slow the window asks for nothing - a question would wait in
-        the queue behind the movement, and the movement is not going to end - so
-        the questions are given to the controller to answer with every snapshot it
-        sends instead.
-
-        The models are among them, and that is the whole reason to slow a run down
-        with a cache: the grid fills and empties while the program is running, so a
-        program whose two streams of addresses throw each other out of the same set
-        can be WATCHED doing it (the architect, 2026-10-22).
-        """
+        """A speed, now and for the run that is already going. It is read every
+        turn of the loop, so a run already under way slows down at once."""
         self.speed = shown.SPEEDS[chooser.get_selected()]
         self.control.speed = self.speed
-        self.control.watching = {} if self.speed is None else {
-            REGISTERS: _of_the_registers, PLACES: _of_the_places,
-            MODELS: _of_the_models}
+        self._watching_again()  # the registers are watched while a run is slow
 
     def _formats(self) -> Gtk.Widget:
         """How every value of the machine is written, which is one choice for all
@@ -280,6 +291,7 @@ class Window(Adw.ApplicationWindow):
                                                    Gtk.Label(label="Console"))
         self.views.append_page(_scrolled(self.messages), Gtk.Label(label="Messages"))
         self._pages_again()
+        self.views.connect("switch-page", self._looking_at)
         return self.views
 
     # ------------------------------------------------- the pages that come and go
@@ -321,6 +333,80 @@ class Window(Adw.ApplicationWindow):
         self.pages_now = wanted
         self.views.set_current_page(min(max(looking, 0),
                                         self.views.get_n_pages() - 1))
+
+    def pages(self) -> list[str]:
+        """Every page of the lower notebook, in the order they are in."""
+        return [*FIXED, *self.pages_now]
+
+    def showing(self, which: int | None = None) -> str:
+        """The name of the page that is OPEN - or of the one at a place, for a
+        notebook says a page is being switched to BEFORE it is the current one.
+        Everything that costs anything to show is asked for by this one name."""
+        pages = self.pages()
+        if which is None:
+            which = self.views.get_current_page()
+        return pages[which] if 0 <= which < len(pages) else ""
+
+    def wanted_now(self, which: int | None = None) -> frozenset[str]:
+        """What has to be asked of the session to show what is on the screen.
+
+        The registers are not in it: they are in the pane beside the editor and are
+        always on the screen, so they are always asked for. Everything else is one
+        page of the lower notebook, and the console, the messages and the text
+        segment need nothing of the session at all - the window has them already.
+        """
+        page = self.showing(which)
+        return frozenset({page} if page not in NEEDS_NOTHING else ())
+
+    def _watching_again(self, which: int | None = None) -> None:
+        """What the thread of the run answers with every snapshot it sends.
+
+        This is how a page stays alive while the machine RUNS. The window cannot
+        ask for anything then - a question waits in the queue behind the movement,
+        and a movement nobody stops never ends - so the questions travel with the
+        snapshots instead, and they are the questions of the OPEN PAGE and of
+        nothing else. That is what makes it affordable: one page, thirty times a
+        second (the architect, 2026-10-25, of a bitmap display that could only be
+        seen by stopping the program).
+
+        The REGISTERS are watched only while a speed is set. They are always on the
+        screen, but a run at the speed of the machine changes them tens of
+        thousands of times a second and what a window would show of that is a blur;
+        putting the three files of them up thirty times a second costs more than
+        the whole of the rest and was measured doing it (it buried the main loop
+        under more work than it could take, 2026-10-25). They are put up the moment
+        the machine stands still - and while a run is SLOW they are the thing
+        somebody is watching, so then they travel too.
+        """
+        wanted = self.wanted_now(which)
+        watching = {} if self.speed is None else {REGISTERS: _of_the_registers}
+        if wanted:
+            watching[SHOWN] = lambda session: _of_what_is_shown(session, wanted)
+        self.control.watching = watching
+
+    def _looking_at(self, notebook, page, which: int) -> None:
+        """Another page was opened: it is watched from now on, and asked for once
+        so that it does not wait for the next snapshot.
+
+        The notebook says WHICH page before that page is the current one, so the
+        number it gives is the one to go by and not what the notebook would answer.
+        """
+        self._watching_again(which)
+        self._asked_for_what_is_shown(which)
+
+    def _asked_for_what_is_shown(self, which: int | None = None) -> None:
+        """Ask the session for the page that is open.
+
+        Nothing is asked while the machine is going: the question would wait in the
+        queue behind the movement. What is shown then comes with the snapshots
+        (`_watching_again`).
+        """
+        if not self.session_is_open or self.state == RUNNING:
+            return
+        wanted = self.wanted_now(which)
+        if wanted:
+            self.control.ask(SHOWN, lambda session: _of_what_is_shown(session,
+                                                                      wanted))
 
     def _page_of(self, name: str) -> Gtk.Widget:
         """The page of one of them, built the first time it is wanted and kept: a
@@ -492,6 +578,7 @@ class Window(Adw.ApplicationWindow):
             self._said(f"the settings of the run could not be kept: "
                        f"{problem.strerror or problem}")
         self._pages_again()
+        self._watching_again()  # and what is watched comes and goes with them
         self._possible()  # the cycle of the pipeline comes and goes with it
         self._said(f"the run: {shown.run_called(settings)}{kept}")
         if self.session_is_open:
@@ -575,6 +662,10 @@ class Window(Adw.ApplicationWindow):
             self._possible()
             self.typing.set_placeholder_text(
                 _WAITING if event.state == WAITING else _TYPE_HERE)
+            # And now the thread of the run may tell us something again. Everything
+            # of a snapshot is done by here, the answers that came with it
+            # included, for the snapshot is the last of its batch.
+            self.control.heard()
         elif isinstance(event, Answer):
             if event.what == ASKING:
                 self._waiting_for_a_line()
@@ -587,11 +678,8 @@ class Window(Adw.ApplicationWindow):
             elif event.what == REGISTERS:
                 self._registers_shown(event.value)
                 return GLib.SOURCE_REMOVE
-            elif event.what == PLACES:
-                self._places_shown(event.value)
-                return GLib.SOURCE_REMOVE
-            elif event.what == MODELS:
-                self._models_shown(event.value)
+            elif event.what == SHOWN:
+                self._shown_now(event.value)
                 return GLib.SOURCE_REMOVE
             elif event.what == DEVICE:
                 self._device_shown(event.value)
@@ -661,41 +749,37 @@ class Window(Adw.ApplicationWindow):
     def _shown(self, shot: Snapshot) -> None:
         """Where the machine stands, and everything that follows from it.
 
-        While the machine RUNS AT ITS OWN SPEED, this does as little as it can: the
-        line that says where the run is, and nothing else. The thread of the run
-        holds the interpreter nearly all the time - a loop of a million
-        instructions a second is a loop of Python - so every call this thread makes
-        waits its turn, and a window that rebuilt its tables thirty times a second
-        would answer the pointer in half a second instead of at once. Nothing of
-        what is left out could be read at that speed anyway; it is all put up the
-        moment the machine stands still.
+        While the machine RUNS, only what is CHEAP is done: the line that says
+        where the run is, and the mark in the margin. Both are a handful of calls
+        into GTK, and the price of a call into GTK while a thread of Python runs
+        flat out is the whole of this rule - the main loop gets the interpreter
+        back only when the running thread's turn runs out, so a call that costs
+        nothing otherwise costs milliseconds here. Measured 2026-10-25: putting the
+        text segment up again, which is a call for every row of it, took TWO
+        SECONDS while a program ran, against a few milliseconds when it stood
+        still. So tables wait for the machine to stand still - or for a run to be
+        slowed down, where the calls are cheap again (`tables_keep_up`) - and a
+        picture, which is one call and a redraw, keeps up either way.
 
-        A SLOWED run is the opposite case, and the reason anybody slows one: the
-        thread of the run sleeps between instructions, so there is time to show
-        everything, and watching is the whole point. The views are put up as they
-        are when the machine stands still - from the answers the controller is
-        carrying with its snapshots - but the editor is not scrolled to the line,
-        because a window that jumped about thirty times a second could not be read.
+        The editor is not SCROLLED to the line while the run goes on - a window
+        that jumped about thirty times a second could not be read - and nothing is
+        asked of the session, because a question would wait in the queue behind the
+        movement and a movement nobody stops never ends.
         """
         self.standing.set_text(shown.standing(shot))
         running = shot.state == RUNNING
-        if running and self.speed is None:
-            return
         place = shot.place
         self.editor.here(place.file if place else None, place.line if place else 0,
                          follow=not running)
         self.here = place.address if place is not None else None
         if self.session_is_open and not running:
-            # Nothing is asked of a run that is going: the question would wait in
-            # the queue behind the movement, and a movement nobody stops does not
-            # end. What a slowed run shows comes from `control.watching`.
             self.control.ask(REGISTERS, _of_the_registers)
             if shot.state in (STANDING, ENDED):
-                # A run that waits for a line is in no state to answer questions
-                # either: the thread is standing in the input.
-                self.control.ask(PLACES, _of_the_places)
-                self.control.ask(MODELS, _of_the_models)
-        self._text_again()
+                # A run that waits for a line is in no state to answer questions:
+                # the thread is standing in the input.
+                self._asked_for_what_is_shown()
+        if self.tables_keep_up:
+            self._text_again()
 
     def _registers_shown(self, values: dict) -> None:
         self.views_of["registers"].show(
@@ -719,50 +803,76 @@ class Window(Adw.ApplicationWindow):
         if panel is not None:
             panel.show(seen, self.mmio_base)
 
-    def _models_shown(self, values: dict) -> None:
-        """What is attached to the machine, and what the models counted.
+    def _shown_now(self, values: dict) -> None:
+        """The views of the page that is open, from what the session answered.
 
-        A page may be up for something the MACHINE has not got: the settings are
-        given to it at an Assemble, so a cache switched on while a program is
+        Only what was ASKED for is in the answer, so every view here asks whether
+        it was. A page may also be up for something the MACHINE has not got - the
+        settings reach it at an Assemble, so a cache switched on while a program is
         already open is a page with nothing in it until the program is assembled
-        again. That is what it says, in those words, rather than looking broken.
-        """
-        self.views_of["cache"].show(shown.caches(values["caches"]))
-        self.pictures["cache"].show(
-            drawing.cache_picture(values["caches"], values["blocks"]))
-        self.views_of["pipeline"].show(shown.pipeline(values["pipeline"],
-                                                      values["guesser"]))
-        self.pictures["pipeline"].show(drawing.pipeline_picture(
-            values["diagram"],
-            values["pipeline"].cycle if values["pipeline"] else -1))
-        self.views_of["counted"].show(shown.counted(values["counted"]))
-        self.pictures["counted"].show(drawing.bars_picture(values["counted"]))
-        for name, wanted in (("cache", values["caches"]),
-                             ("pipeline", values["pipeline"]),
-                             ("counted", values["counted"])):
-            self.views_of[name].says("" if wanted else _NOT_GIVEN % _THINGS[name])
-        self.mmio_base = values["base"]
-        attached = {seen.name: seen for seen in values["devices"]}
-        for name in self.pages_now:
-            if name.startswith(_DEVICE):
-                self.panels[name].show(attached.get(name[len(_DEVICE):]),
-                                       values["base"])
+        again - and that is what it then says, rather than looking broken.
 
-    def _places_shown(self, values: dict) -> None:
-        self.views_of["data"].show(shown.data(values["data"], self.format))
-        self.views_of["labels"].show(shown.labels(values["labels"]))
-        self.views_of["frames"].show(shown.frames(values["frames"]))
+        WHILE A RUN GOES AT THE SPEED OF THE MACHINE, only the pictures are put up
+        (`tables_keep_up`): the grid of a cache fills, the diagram draws itself and
+        a bitmap display paints - which is what somebody watching one is watching -
+        and the numbers beside them wait for the machine to stand still or for the
+        run to be slowed down (the architect, 2026-10-25).
+        """
+        tables = self.tables_keep_up
+        if tables and "data" in values:
+            self.views_of["data"].show(shown.data(values["data"], self.format))
+        if tables and "labels" in values:
+            self.views_of["labels"].show(shown.labels(values["labels"]))
+        if tables and "frames" in values:
+            self.views_of["frames"].show(shown.frames(values["frames"]))
+        if "caches" in values:
+            self.pictures["cache"].show(
+                drawing.cache_picture(values["caches"], values["blocks"]))
+            if tables:
+                self.views_of["cache"].show(shown.caches(values["caches"]))
+                self._said_of("cache", values["caches"])
+        if "pipeline" in values:
+            self.pictures["pipeline"].show(drawing.pipeline_picture(
+                values["diagram"],
+                values["pipeline"].cycle if values["pipeline"] else -1))
+            if tables:
+                self.views_of["pipeline"].show(shown.pipeline(values["pipeline"],
+                                                              values["guesser"]))
+                self._said_of("pipeline", values["pipeline"])
+        if "counted" in values:
+            self.pictures["counted"].show(drawing.bars_picture(values["counted"]))
+            if tables:
+                self.views_of["counted"].show(shown.counted(values["counted"]))
+                self._said_of("counted", values["counted"])
+        if "devices" in values:
+            self.mmio_base = values["base"]
+            attached = {seen.name: seen for seen in values["devices"]}
+            for name in self.pages_now:
+                if name.startswith(_DEVICE):
+                    self.panels[name].show(attached.get(name[len(_DEVICE):]),
+                                           self.mmio_base, tables=tables)
+
+    def _said_of(self, name: str, wanted) -> None:
+        """What a view of a model says while it has nothing to show."""
+        self.views_of[name].says("" if wanted else _NOT_GIVEN % _THINGS[name])
 
     def _text_again(self) -> None:
         """The text segment: the program itself, with the place the machine stands
-        on and the places it stops before marked."""
+        on and the places it stops before marked.
+
+        The marked lines of each file are gathered ONCE. Asking a page which of its
+        lines are marked walks the whole of its buffer, and this was asking it for
+        every instruction of the program - which cost nothing while it was done
+        once at a stop, and buried the window the day it began to be done thirty
+        times a second (2026-10-25).
+        """
         if self.program is None:
             return
+        marked = {page.path: set(page.marked("breakpoint"))
+                  for page in self.editor.pages if page.path}
         breaks = {entry.address for entry in self.program.text
-                  for page in self.editor.pages
-                  if page.path and entry.loc is not None
-                  and entry.loc.file == page.path
-                  and entry.loc.line in page.marked("breakpoint")}
+                  if entry.loc is not None
+                  and entry.loc.line in marked.get(entry.loc.file, ())}
         self.views_of["text"].show(
             shown.text(self.program.text, self.here, breaks, self.format))
 
@@ -771,8 +881,26 @@ class Window(Adw.ApplicationWindow):
         self._text_again()
         if self.session_is_open:
             self.control.ask(REGISTERS, _of_the_registers)
-            self.control.ask(PLACES, _of_the_places)
-            self.control.ask(MODELS, _of_the_models)
+            self._asked_for_what_is_shown()
+
+    @property
+    def tables_keep_up(self) -> bool:
+        """Whether a TABLE may be put up again now.
+
+        A table is a call into GTK for every row of it, and such a call costs a
+        hundred times its price while a thread of Python runs flat out: the main
+        loop gets the interpreter back only when the running thread's turn runs
+        out. Measured 2026-10-25: the text segment took TWO SECONDS to put up
+        while a program ran, against a few milliseconds when it stood still.
+
+        So tables keep up while the machine stands still, and while a run is held
+        back to a SPEED - a slowed run sleeps between its instructions, so the
+        calls are cheap again and watching the numbers change is the whole point of
+        slowing it. They wait while a run goes at the speed of the machine, where
+        nothing of them could be read anyway. A PICTURE is one call and a redraw,
+        so a picture keeps up either way.
+        """
+        return self.state != RUNNING or self.speed is not None
 
     @property
     def session_is_open(self) -> bool:
@@ -818,8 +946,15 @@ class Window(Adw.ApplicationWindow):
 # What the window asks the session for under its own name.
 BREAKS = "breaks"
 REGISTERS = "the registers"
-PLACES = "the places"
-MODELS = "the models"
+SHOWN = "what is shown"  # the views of the ONE page of the lower notebook that is open
+
+# The pages of the lower notebook that are always there, in the order they are in.
+FIXED = ("text", "data", "labels", "frames", "console", "messages")
+
+# The pages that need nothing of the session: the window has the text segment
+# already (it is the program, which it was given), and the console and the
+# messages are what was said into them.
+NEEDS_NOTHING = ("", "text", "console", "messages")
 
 # What a view of a model says while the MACHINE has not got that model. The pages
 # come and go with the settings, so a page that is there at all was asked for; what
@@ -848,18 +983,38 @@ def _of_the_registers(session) -> dict:
             "control": session.csr()}
 
 
-def _of_the_places(session) -> dict:
-    return {"data": session.data(), "labels": session.symbols(),
-            "frames": session.frames()}
+def _of_what_is_shown(session, wanted) -> dict:
+    """Everything the OPEN PAGE needs, and nothing besides.
 
-
-def _of_the_models(session) -> dict:
-    """Everything around the machine, in one asking: the devices and the three
-    models, which are shown together and are each a question of their own."""
-    return {"devices": session.devices(), "base": session.options.config.mmio_base,
-            "caches": session.caches(), "blocks": session.cache_lines(),
-            "pipeline": session.pipeline(), "guesser": session.guesser(),
-            "diagram": session.diagram(), "counted": session.statistics()}
+    A page nobody is looking at costs nothing. The picture of a bitmap display is
+    half a megabyte, the diagram of a pipeline two hundred rows, the data segment
+    whatever the program laid out - and none of it is worth taking a copy of while
+    something else is on the screen (the architect, 2026-10-25). This is asked
+    thirty times a second while a program runs, so what it leaves out is the whole
+    of the saving.
+    """
+    answer: dict = {}
+    if "data" in wanted:
+        answer["data"] = session.data()
+    if "labels" in wanted:
+        answer["labels"] = session.symbols()
+    if "frames" in wanted:
+        answer["frames"] = session.frames()
+    if "cache" in wanted:
+        answer["caches"] = session.caches()
+        answer["blocks"] = session.cache_lines()
+    if "pipeline" in wanted:
+        answer["pipeline"] = session.pipeline()
+        answer["guesser"] = session.guesser()
+        answer["diagram"] = session.diagram()
+    if "counted" in wanted:
+        answer["counted"] = session.statistics()
+    devices = [one[len(_DEVICE):] for one in wanted if one.startswith(_DEVICE)]
+    if devices:
+        answer["base"] = session.options.config.mmio_base
+        answer["devices"] = [one for one in session.devices()
+                             if one.name in devices]
+    return answer
 
 # What the line under the console says when nothing is in it.
 _TYPE_HERE = "A line for the program"

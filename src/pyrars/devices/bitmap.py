@@ -22,6 +22,8 @@ never filled past its last word.
 
 from collections.abc import Callable
 
+from array import array
+
 from pyrars.core.memory import ADDRESS_MASK, Access, MemAccess
 from pyrars.devices.base import Connection, Model
 
@@ -64,7 +66,10 @@ class BitmapDisplay(Model):
         self.columns = width // unit_width
         self.rows = height // unit_height
         self.base = 0
-        self.frame = [0] * (self.columns * self.rows)
+        # The picture, a word to a unit, as an ARRAY of words and not a list of
+        # numbers: whoever draws it wants the BYTES of it, and an array hands them
+        # over as one copy of memory (`looks`).
+        self.frame = array("I", bytes(4 * self.columns * self.rows))
         self.watchers: list[Callable[[int | None], None]] = []
         self._unwatch: Callable[[], None] | None = None
 
@@ -86,10 +91,10 @@ class BitmapDisplay(Model):
         """The picture is what the memory holds now."""
         if self.connection is not None:
             memory = self.connection.memory
-            self.frame = [memory.peek(self.base + 4 * index, 4)
-                          for index in range(self.columns * self.rows)]
+            self.frame = array("I", [memory.peek(self.base + 4 * index, 4)
+                                     for index in range(self.columns * self.rows)])
         else:
-            self.frame = [0] * (self.columns * self.rows)
+            self.frame = array("I", bytes(4 * self.columns * self.rows))
         self._changed(None)
 
     def _wrote(self, access: MemAccess) -> None:
@@ -107,13 +112,20 @@ class BitmapDisplay(Model):
     # --------------------------------------------------------- what a viewer does
 
     def looks(self) -> dict[str, object]:
-        """The picture itself: every unit as the colour it holds.
+        """The picture itself, as the BYTES of an image.
 
-        A copy, taken while the thread of the run holds it - whoever draws it has
-        its own thread, and a list that was being written to as it was read would
-        tear.
+        The frame is an array of words, so this is one copy of memory and nothing
+        else: no loop, and no number made into an object. A picture of 512 by 256
+        is a hundred and thirty thousand units, and handing them over as a tuple of
+        Python integers for somebody else to pack again cost four milliseconds a
+        snapshot; this costs three hundredths of one (the architect, 2026-10-25).
+
+        A copy, because whoever draws it has a thread of its own and an array being
+        written to while it was read would tear. The bytes ARE the words of memory
+        as the machine holds them - blue, green, red, unused on a machine of this
+        order - which is the order a picture of 32-bit pixels is drawn from.
         """
-        return {"units": tuple(self.frame), "columns": self.columns,
+        return {"pixels": bytes(self.frame), "columns": self.columns,
                 "rows": self.rows, "unit_width": self.unit_width,
                 "unit_height": self.unit_height}
 
@@ -131,7 +143,7 @@ class BitmapDisplay(Model):
 
     def units(self) -> list[list[int]]:
         """The picture, row by row."""
-        return [self.frame[row * self.columns:(row + 1) * self.columns]
+        return [list(self.frame[row * self.columns:(row + 1) * self.columns])
                 for row in range(self.rows)]
 
     def colour(self, word: int) -> tuple[int, int, int]:

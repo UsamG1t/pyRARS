@@ -610,6 +610,100 @@ def test_a_snapshot_goes_out_no_oftener_than_it_was_asked_to(told, tmp_path):
     assert len([one for one in often.snapshots if one.state == RUNNING]) == 10
 
 
+def test_the_thread_gives_the_interpreter_up_with_every_snapshot(told, tmp_path):
+    """And with every snapshot only, not with every instruction.
+
+    A thousandth of a second given up is what lets whoever owns a main loop have
+    the interpreter at all (see `YIELD`); given up per INSTRUCTION it would divide
+    the speed of the machine by thirty. So: a run that sends a snapshot a turn
+    takes at least a millisecond a turn, and a run that sends one an hour takes no
+    time at all.
+    """
+    from pyrars.session.control import YIELD
+
+    with RunController(told, out=io.StringIO(), every=0) as control:
+        opened(control, tmp_path)
+        began = time.monotonic()
+        control.carry_on()
+        assert control.settled(20)
+        often = time.monotonic() - began
+    assert told.last.instructions == WHOLE
+    assert often >= (WHOLE - 1) * YIELD
+
+    with RunController(told, out=io.StringIO(), every=3600) as control:
+        opened(control, tmp_path)
+        began = time.monotonic()
+        control.carry_on()
+        assert control.settled(20)
+        seldom = time.monotonic() - began
+    assert seldom < WHOLE * YIELD  # one snapshot, one millisecond given up
+
+
+def test_a_run_that_is_slowed_gives_way_by_being_slow(told, tmp_path):
+    """A run held back to a speed sleeps between its instructions, so it is not
+    made to give up anything besides: the pace it was asked for is the pace it
+    keeps."""
+    with RunController(told, out=io.StringIO(), every=0, speed=200) as control:
+        opened(control, tmp_path)
+        began = time.monotonic()
+        control.carry_on()
+        assert control.settled(20)
+        took = time.monotonic() - began
+    # eighteen instructions at two hundred a second is a tenth of a second; a
+    # millisecond given up on top of each would be a fifth
+    assert took < 1.5 * WHOLE / 200
+
+
+def test_nothing_more_is_said_until_the_last_was_heard(told, tmp_path):
+    """Whoever is told does work for every snapshot, and a machine at its own
+    speed can say more than any window can answer for. So one who asks to be
+    waited for is waited for."""
+    with RunController(told, out=io.StringIO(), every=0, waits=True) as control:
+        opened(control, tmp_path, FOREVER)
+        control.carry_on()
+        assert waited_for(lambda: len(told.snapshots) >= 2)
+        held = len(told.snapshots)
+        time.sleep(0.1)  # a tenth of a second of a run without an end
+        assert len(told.snapshots) == held  # and not a word more
+        control.heard()
+        assert waited_for(lambda: len(told.snapshots) == held + 1)
+        time.sleep(0.05)
+        assert len(told.snapshots) == held + 1
+        control.stop()
+        assert control.settled()
+    # the snapshot a movement ENDS on is not held back by anybody: a window must
+    # be told that the machine has stopped
+    assert told.last.state == ENDED
+
+
+def test_the_snapshot_is_the_last_word_of_a_batch(told, tmp_path):
+    """Whoever is told says it has HEARD when it has the snapshot, so by then it
+    must have had everything that came with it: the answers of what is being
+    watched go out first and the snapshot closes the batch."""
+    with RunController(told, out=io.StringIO(), every=0, waits=True) as control:
+        opened(control, tmp_path)
+        control.watching = {"counted": lambda session: session.count().instructions}
+        control.step(1)
+        assert control.settled()
+    kinds = [(type(one).__name__, getattr(one, "what", getattr(one, "state", "")))
+             for one in told.events]
+    answered = kinds.index(("Answer", "counted"))
+    snapshot = next(index for index, one in enumerate(kinds)
+                    if one == ("Snapshot", RUNNING))
+    assert answered < snapshot
+
+
+def test_whoever_does_not_ask_to_be_waited_for_is_told_as_often_as_ever(told,
+                                                                       tmp_path):
+    """A test, a script, anything that only keeps what it is told: the loop says
+    what it has to say and does not wait for an answer."""
+    with RunController(told, out=io.StringIO(), every=0) as control:
+        opened(control, tmp_path)
+        control.step(5)
+        assert control.settled()
+    assert len([one for one in told.snapshots if one.state == RUNNING]) == 5
+
+
 def test_every_movement_says_at_once_that_it_is_running(told, tmp_path):
     """However seldom snapshots go out, each movement says where it is as it
     begins: a window that was told to carry on must not look as if nothing

@@ -7,9 +7,9 @@ picture), and the picking of a widget for it happens here and nowhere else.
 Not every device has a picture, and one is not invented for those that have not: a
 timer is a time and a time it was asked for, a halt register is the word last
 written to it, and a drawing of a number tells nobody anything that the number
-does not. A device with a picture gets it BESIDE its table - the bitmap display its units,
-the keyboard and display the text it shows, the digital lab its segments and
-its keys, the disk its blocks, the controller how far it has got.
+does not. A device with a picture gets it BESIDE its table: the bitmap display
+its units, the keyboard and display the text it shows, the digital lab its
+segments and its keys, the disk its blocks, the controller how far it has got.
 Beside, because the room the views have is wide and shallow while a picture and a
 table of names and values are both narrow and long (the architect, 2026-10-22).
 
@@ -109,15 +109,24 @@ class Panel(Gtk.Box):
         if key is not None:
             self.pressed(self.device, key)
 
-    def show(self, seen, base: int = 0) -> None:
-        """What the device is now: its table always, and its picture where it has
-        one. A device that is not attached any more is left as it was - the last
-        thing it held is more use than an empty panel."""
+    def show(self, seen, base: int = 0, tables: bool = True) -> None:
+        """What the device is now: its picture where it has one, and its table.
+
+        `tables` is false while the machine RUNS: a table is a call into GTK for
+        every row of it and those calls are dear while a thread of Python runs flat
+        out, where a picture is one call and a redraw (the rule of
+        `Window._shown`). So a bitmap display paints and a lab lights up while the
+        program runs, and their numbers wait for it to stand still.
+
+        A device that is not attached any more is left as it was: the last thing it
+        held is more use than an empty panel.
+        """
         if seen is None:
             return
-        self.table.show(shown.one_state(seen, base))
         if self.picture is not None:
             self.picture.show(self.made(seen.looks))
+        if tables:
+            self.table.show(shown.one_state(seen, base))
 
 
 def _clicked_on(what: str) -> int | None:

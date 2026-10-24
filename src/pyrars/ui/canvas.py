@@ -10,8 +10,6 @@ the desktop; the colours of the data are named in the picture and fixed there,
 because a block that has been written to is red in any theme.
 """
 
-import struct
-
 import cairo
 import gi
 
@@ -115,9 +113,12 @@ class Pixels(Gtk.DrawingArea):
     """The bitmap display: one word of memory is one unit of the picture, and the
     low 24 bits of that word are its red, green and blue.
 
-    The units arrive as the numbers they are (`BitmapDisplay.looks`) and are packed
-    into an image in one call, because a picture of 512 by 256 is a hundred and
-    thirty thousand of them and a loop in Python over that is a tenth of a second.
+    The picture arrives as the BYTES of the words of memory (`BitmapDisplay.looks`)
+    and is handed to cairo as it comes: no packing, no copying, nothing counted.
+    That is the whole reason the device keeps its frame as an array - a picture of
+    512 by 256 is half a megabyte, and making a hundred and thirty thousand Python
+    integers of it and packing them again cost four milliseconds a snapshot.
+
     A unit larger than a pixel is drawn by scaling the image and asking for no
     smoothing: a unit is a square of one colour, not a blur of four.
     """
@@ -138,13 +139,15 @@ class Pixels(Gtk.DrawingArea):
         self.queue_draw()
 
     def _drawn(self, area, context, width: int, height: int) -> None:
-        units = self.looks.get("units", ())
+        pixels = self.looks.get("pixels", b"")
         columns = int(self.looks.get("columns", 0))
         rows = int(self.looks.get("rows", 0))
-        if not units or columns < 1 or rows < 1:
+        if not pixels or columns < 1 or rows < 1:
             return
-        held = bytearray(struct.pack(f"<{len(units)}I", *units))
-        image = cairo.ImageSurface.create_for_data(held, cairo.FORMAT_RGB24,
+        # cairo writes into what it is given, so the bytes are copied into
+        # something writable - one copy of memory, and the only one.
+        image = cairo.ImageSurface.create_for_data(bytearray(pixels),
+                                                   cairo.FORMAT_RGB24,
                                                    columns, rows, columns * 4)
         context.scale(int(self.looks.get("unit_width", 1)),
                       int(self.looks.get("unit_height", 1)))

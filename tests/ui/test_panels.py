@@ -160,12 +160,14 @@ def test_a_picture_on_the_screen(showing, gtk):
 
 def test_the_units_of_a_bitmap_become_the_pixels_of_an_image(gtk):
     """One word of memory is one unit, and the low 24 bits of it are its colour.
-    The words are packed in one call, because a picture of 512 by 256 is a hundred
-    and thirty thousand of them."""
+    The bytes of the words ARE the image, so nothing is packed at all."""
     from pyrars.ui.canvas import Pixels
 
     made = Pixels()
-    made.show({"units": (0xFF0000, 0x00FF00, 0x0000FF, 0xFFFFFF),
+    made.show({"pixels": bytes((0x00, 0x00, 0xFF, 0x00,   # red, as a word is held
+                                0x00, 0xFF, 0x00, 0x00,   # green
+                                0xFF, 0x00, 0x00, 0x00,   # blue
+                                0xFF, 0xFF, 0xFF, 0x00)),  # white
                "columns": 2, "rows": 2, "unit_width": 3, "unit_height": 3})
     assert made.get_size_request() == (6, 6)  # two units of three pixels
     surface = painted(made, 6, 6)

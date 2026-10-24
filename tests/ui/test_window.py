@@ -143,6 +143,16 @@ def sensible(window) -> set[str]:
     return {name for name, button in window.buttons.items() if button.get_sensitive()}
 
 
+def looking(window, page: str) -> None:
+    """Open a page of the lower views, as a person does before reading it.
+
+    The window asks the session for the page that is OPEN and for nothing else
+    (`Window.wanted_now`), so a test that wants to read a view must say that
+    somebody is looking at it - which is also what makes the tests read like use.
+    """
+    window.views.set_current_page(window.pages().index(page))
+
+
 def shown(view) -> str:
     """What a view of text holds; a label is asked for its text instead."""
     if isinstance(view, Gtk.Label):
@@ -598,6 +608,22 @@ def test_the_registers_follow_the_machine(window, turning):
     assert turning(lambda: _row(window, "registers", "t0")[2] == "0x00000000")
 
 
+def test_the_margins_are_read_once_for_the_text_segment(window, turning):
+    """Asking a page which of its lines are marked walks the whole of its buffer,
+    so it is asked ONCE and not once for every instruction of the program. It was
+    the other way, which cost nothing while the text segment was put up at a stop
+    and buried the window the day it began to be put up as a run went on
+    (2026-10-25)."""
+    window.do("assemble")
+    assert turning(lambda: window.state == "standing")
+    page = window.editor.page
+    asked, marked = [], page.marked
+    page.marked = lambda category: (asked.append(category), marked(category))[1]
+    window._text_again()
+    assert asked == ["breakpoint"]  # once, however many rows the table has
+    assert len(window.views_of["text"].rows) > 5
+
+
 def test_the_text_segment_is_the_program_with_its_places_marked(window, turning):
     from pyrars.ui.shown import BREAK, HERE
 
@@ -613,23 +639,32 @@ def test_the_text_segment_is_the_program_with_its_places_marked(window, turning)
 
 def test_the_data_the_labels_and_the_frames(window, turning):
     window.do("assemble")
+    assert turning(lambda: window.state == "standing")
+    looking(window, "labels")
     assert turning(lambda: window.views_of["labels"].rows != [])
     assert ("main", "0x00400000", "global") in window.views_of["labels"].rows
-    assert any(row[1] == ".word" for row in window.views_of["data"].rows)
+    looking(window, "frames")
+    assert turning(lambda: True)
     assert window.views_of["frames"].rows == []  # it is inside no call yet
+    looking(window, "data")
+    assert turning(lambda: any(row[1] == ".word"
+                               for row in window.views_of["data"].rows))
     window.editor.toggle_breakpoint(window.editor.page, 7)
     assert turning(lambda: True)
     window.do("continue")
-    assert turning(lambda: window.views_of["data"].rows != [])
+    assert turning(lambda: window.state == "standing")
     # the one word the program keeps is there, wherever the run has got to
-    assert any(row[0] == "0x10010000" for row in window.views_of["data"].rows)
+    assert turning(lambda: any(row[0] == "0x10010000"
+                               for row in window.views_of["data"].rows))
 
 
 def test_what_a_run_wrote_shows_in_the_data(window, turning):
     window.do("assemble")
     assert turning(lambda: window.state == "standing")
+    looking(window, "data")
     window.do("continue")
     assert turning(lambda: window.state == "ended")
+    assert turning(lambda: window.views_of["data"].rows != [])
     kept = [row for row in window.views_of["data"].rows if row[0] == "0x10010000"]
     assert kept and kept[0][3] == "0x00000006"  # 3 + 2 + 1, as the loop counts down
 
@@ -645,17 +680,17 @@ def test_the_format_chosen_reaches_every_view(window, turning):
     assert all(not row[2].startswith("0x") for row in window.views_of["text"].rows)
 
 
-def test_the_views_are_left_alone_while_the_machine_runs(gtk, tmp_path, turning):
-    """While the machine runs, the window does the least it can.
+def test_the_tables_are_left_alone_while_the_machine_runs(gtk, tmp_path, turning):
+    """A table is a call into GTK for every row of it, and such a call costs a
+    hundred times its price while a thread of Python runs flat out: the main loop
+    gets the interpreter back only when the running thread's turn runs out.
+    Measured 2026-10-25 - the text segment took TWO SECONDS to put up while a
+    program ran - and measured at six hundred milliseconds a snapshot back in
+    stage 45, which is where this rule began.
 
-    The thread of the run holds the interpreter nearly all the time - a loop of a
-    million instructions a second is a loop of Python - so every call this thread
-    makes waits its turn. A window that rebuilt its tables thirty times a second
-    answered the pointer in half a second instead of at once; measured at six
-    hundred milliseconds a snapshot before this, and under forty after.
-
-    Nothing of what is left out could be read at that speed anyway, and all of it
-    is put up the moment the machine stands still.
+    So the tables wait for the machine to stand still (or for the run to be
+    slowed, which the test below this one is about), and nothing of them could be
+    read at that speed anyway.
     """
     from pyrars.ui.window import Window
 
@@ -665,6 +700,8 @@ def test_the_views_are_left_alone_while_the_machine_runs(gtk, tmp_path, turning)
     try:
         made.do("assemble")
         assert turning(lambda: made.state == "standing")
+        looking(made, "labels")
+        assert turning(lambda: made.views_of["labels"].rows != [])
         asked = len(made.views_of["labels"].rows)
         registers = len(made.views_of["registers"].rows)
         assert asked and registers
@@ -735,9 +772,10 @@ def test_a_file_that_is_nowhere_has_no_line_to_run_to(gtk, tmp_path, turning):
 # --------------------------------------------------- how fast the run goes
 
 
-def test_the_models_are_watched_while_a_slowed_run_goes(gtk, tmp_path, turning):
-    """The reason anybody slows a run down with a cache: the grid fills while the
-    program runs, instead of after it."""
+def test_the_picture_of_a_cache_fills_while_the_run_goes_on(gtk, tmp_path, turning):
+    """The reason anybody watches a cache at all: the grid fills while the program
+    runs, instead of after it. A picture is one call into GTK and a redraw, so it
+    keeps up at any speed - the numbers beside it wait."""
     from pyrars.session import settings as runs
     from pyrars.ui import shown as writing
     from pyrars.ui.window import Window
@@ -752,34 +790,89 @@ def test_the_models_are_watched_while_a_slowed_run_goes(gtk, tmp_path, turning):
     try:
         made.do("assemble")
         assert turning(lambda: made.state == "standing")
-        made.how_fast.set_selected(writing.SPEEDS.index(10.0))
-        made.do("continue")
+        looking(made, "cache")
+        assert turning(lambda: made.views_of["cache"].rows != [])
+        made.do("continue")  # at the speed of the machine, and no slower
         assert turning(lambda: made.state == "running")
-        # the cache is answered for WHILE the run goes on, and the grid with it
+        # the grid fills while the run goes on: blocks it is holding, drawn
+        assert turning(lambda: any(part.fill == "clean" for part in
+                                   made.pictures["cache"].picture.parts))
+        assert made.state == "running"
+        # and the numbers wait, because a table is dear while a run is flat out:
+        # the cache has been reached hundreds of times by now, and the table still
+        # says what it said before the run began
+        said = {row[1]: row[2] for row in made.views_of["cache"].rows}
+        assert said["accesses"] == "0"
+        made.do("pause")
         assert turning(lambda: any(row[1] == "accesses" and row[2] != "0"
                                    for row in made.views_of["cache"].rows))
-        assert made.state == "running"
-        drawn = made.pictures["cache"].picture
-        assert any(part.fill == "clean" for part in drawn.parts)
-        made.do("pause")
-        assert turning(lambda: made.state == "standing")
     finally:
         made.close_up()
 
 
-def test_the_speed_chosen_reaches_the_run(window):
-    """And with it the questions the controller is to answer while the run goes
-    on: a window cannot ask for anything of its own while a movement is being
-    carried out."""
-    from pyrars.ui import shown as writing
-    from pyrars.ui.window import MODELS, PLACES, REGISTERS
+def test_a_bitmap_display_paints_while_the_program_runs(gtk, tmp_path, turning):
+    """What all of this was for (the architect, 2026-10-25): a program that paints
+    at the speed of the machine, and a picture that FILLS while it does - instead
+    of appearing all at once when the program is stopped.
 
+    A picture is one call into GTK and a redraw, so it can be put up thirty times
+    a second even while a thread of Python runs flat out; a table cannot, and the
+    numbers of the display wait (the test above).
+    """
+    from pyrars.session import settings as runs
+    from pyrars.ui.window import Window
+
+    # a program that paints its own words, one pixel at a time, and never stops
+    (tmp_path / "main.s").write_text(
+        ".globl main\n.text\n"
+        "main:  li s0, 0x10040000\n       li s1, 0x00ff00\n"
+        "loop:  sw s1, 0(s0)\n       addi s0, s0, 4\n       j loop\n")
+    made = Window(files=(str(tmp_path / "main.s"),), cache=str(tmp_path / "cache"),
+                  settings=runs.Settings(devices={"bitmap": {
+                      "place": "heap", "width": 64, "height": 32}}))
+    try:
+        made.do("assemble")
+        assert turning(lambda: made.state == "standing")
+        looking(made, "device:bitmap")
+        painted = made.panels["device:bitmap"].picture
+        assert turning(lambda: painted.looks != {})
+        assert not any(painted.looks["pixels"])  # nothing is painted yet
+        made.do("continue")
+        assert turning(lambda: made.state == "running")
+        # the picture fills WHILE the program runs, and goes on filling
+        assert turning(lambda: any(painted.looks["pixels"]), 5.0)
+        painted_now = sum(1 for one in painted.looks["pixels"] if one)
+        assert made.state == "running"
+        # and the NUMBERS of the display wait: a table is a call for every row
+        said = dict(made.panels["device:bitmap"].table.rows)
+        assert said["painted"].startswith("0 of")
+        assert turning(lambda: sum(1 for one in painted.looks["pixels"]
+                                   if one) > painted_now, 5.0)
+        made.do("stop")
+        assert turning(lambda: made.state == "ended")
+    finally:
+        made.close_up()
+
+
+def test_the_speed_chosen_reaches_the_run(window, turning):
+    """And with it what the thread of the run answers for while it goes: the open
+    page always, and the REGISTERS once a speed is set, because a slowed run is
+    one somebody is reading the registers of."""
+    from pyrars.ui import shown as writing
+    from pyrars.ui.window import REGISTERS, SHOWN
+
+    looking(window, "labels")
+    assert turning(lambda: True)
+    assert set(window.control.watching) == {SHOWN}  # the page that is open
     window.how_fast.set_selected(len(writing.SPEEDS) - 1)  # the slowest there is
     assert window.speed == min(speed for speed in writing.SPEEDS if speed)
     assert window.control.speed == window.speed
-    assert set(window.control.watching) == {REGISTERS, PLACES, MODELS}
+    assert set(window.control.watching) == {REGISTERS, SHOWN}
     window.how_fast.set_selected(0)  # as fast as it can again
     assert window.speed is None and window.control.speed is None
+    assert set(window.control.watching) == {SHOWN}
+    looking(window, "console")  # and a page that needs nothing asks for nothing
+    assert turning(lambda: True)
     assert window.control.watching == {}
 
 
@@ -801,6 +894,8 @@ def test_the_views_keep_up_while_a_slowed_run_goes(gtk, tmp_path, turning):
         made.do("assemble")
         assert turning(lambda: made.state == "standing")
         made.open(str(tmp_path / "notes.s"))  # and this is what is being looked at
+        looking(made, "labels")
+        assert turning(lambda: made.views_of["labels"].rows != [])
         made.how_fast.set_selected(writing.SPEEDS.index(10.0))
         made.do("continue")
         assert turning(lambda: made.state == "running")
@@ -878,6 +973,7 @@ def test_a_page_whose_model_the_machine_has_not_got_says_so(window, turning):
     assert turning(lambda: window.state == "standing")
     window.the_run_is(runs.Settings(cache={}))
     assert "Cache" in _titles(window)
+    looking(window, "cache")
     assert turning(lambda: "not been assembled since a cache was asked for"
                    in window.views_of["cache"].saying)
     assert "assemble again to run it that way" in shown(window.messages)
@@ -902,6 +998,7 @@ def test_the_models_and_the_devices_of_a_run(gtk, tmp_path, turning):
         assert turning(lambda: made.state == "standing")
         made.do("continue")
         assert turning(lambda: made.state == "ended")
+        looking(made, "cache")
         assert turning(lambda: made.views_of["cache"].rows != [])
 
         # the cache was built as it was asked for, and it saw the run
@@ -918,6 +1015,8 @@ def test_the_models_and_the_devices_of_a_run(gtk, tmp_path, turning):
         assert sum(1 for part in drawn.parts if part.fill == "dirty") == 1
 
         # the pipeline counted the time, and the guesser under it
+        looking(made, "pipeline")
+        assert turning(lambda: made.views_of["pipeline"].rows != [])
         counted = {row[0]: row[1] for row in made.views_of["pipeline"].rows}
         assert int(counted["cycles"]) > int(counted["instructions"]) == WHOLE
         assert counted["guesser"].startswith("a table of 16 entries")
@@ -930,13 +1029,17 @@ def test_the_models_and_the_devices_of_a_run(gtk, tmp_path, turning):
                    if part.fill == "execute" and part.text != "EX") == WHOLE
 
         # the device has a page of its own, saying where a program finds it
+        looking(made, "device:timer")
         panel = made.panels["device:timer"]
+        assert turning(lambda: panel.table.rows != [])
         assert [row[0] for row in panel.table.rows][:2] == ["where", "size"]
         assert panel.table.rows[0][1] == "0xffff0018"
         assert "virtual" in dict(panel.table.rows)["clock"]
         assert panel.picture is None  # a timer is a time: there is nothing to draw
 
         # and what the run was made of, written out and drawn
+        looking(made, "counted")
+        assert turning(lambda: made.views_of["counted"].rows != [])
         made_of = {row[0]: row[1] for row in made.views_of["counted"].rows}
         assert made_of["instructions"] == str(WHOLE)
         assert int(made_of["branches that went"]) == 2  # the loop turns three times
@@ -977,6 +1080,8 @@ def test_the_cycles_of_the_pipeline_are_walked_in_the_window(gtk, tmp_path, turn
         made.do("assemble")
         assert turning(lambda: made.state == "standing")
         assert made.buttons["cycle"].get_visible()
+        looking(made, "pipeline")
+
         def said() -> str:
             """What the diagram says of the cycle it is showing."""
             return next((part.text for part in
@@ -1021,6 +1126,7 @@ def test_a_program_that_asks_for_its_numbers_by_the_keys_of_the_lab(gtk, tmp_pat
     try:
         made.do("assemble")
         assert turning(lambda: made.state == "standing")
+        looking(made, "device:lab")  # as somebody pressing its keys would
         made.do("continue")
         assert turning(lambda: made.state == "running")
         panel = made.panels["device:lab"]
@@ -1102,6 +1208,8 @@ def test_a_table_with_nothing_in_it_says_why(window, turning):
     window.do("assemble")
     assert turning(lambda: window.state == "standing")
     assert window.views_of["text"].saying == ""  # it holds rows now
+    looking(window, "frames")
+    assert turning(lambda: True)
     assert window.views_of["frames"].saying.startswith("The run is inside no call")
 
 
@@ -1137,6 +1245,7 @@ back:   lw ra, 4(sp)
         made.do("assemble")
         assert turning(lambda: made.state == "standing")
         made.editor.toggle_breakpoint(made.editor.page, 17)  # `one:`, the bottom
+        looking(made, "frames")
         assert turning(lambda: True)
         made.do("continue")
         assert turning(lambda: made.state == "standing"

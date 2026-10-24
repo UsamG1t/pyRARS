@@ -24,6 +24,12 @@ Everything else a session can do - the breakpoints, the watchpoints, every view,
 `set` and `poke` - is a QUESTION, asked with `ask` and a function over the session,
 so that this module does not have to grow a method for every method of a session.
 
+What comes back is also PACED BY WHOEVER IS TOLD, where they ask for that
+(`waits`): the loop says nothing more until it has been told that the last
+snapshot was dealt with. A window does work for every snapshot it gets, and a
+machine that runs a hundred thousand instructions a second can tell it more than
+it can ever answer for.
+
 A run may be SLOWED: `speed` is how many instructions a second it is allowed to
 carry out, or nothing at all for as fast as it can (RARS has the same, as a slider
 from one a second to unlimited). It is read every turn of the loop, so it may be
@@ -49,6 +55,19 @@ from pyrars.session.project import Project
 # How often a snapshot goes out while a program runs. Thirty a second is what a
 # screen can show and an eye can follow; the loop pays one comparison a turn.
 EVERY = 1 / 30
+
+# How long the thread of the run GIVES UP with every snapshot it sends, so that
+# whoever owns a main loop can have the interpreter.
+#
+# `time.sleep(0)` was here first and does not do it. CPython hands the interpreter
+# on when a thread's slice runs out - five milliseconds by default - and whoever
+# owns the main loop of a window asks for it back after every call it makes into C,
+# so it loses that race again and again. Measured on a program that paints a bitmap
+# at full speed: the main loop of the window waited NINE SECONDS for a turn, and
+# the window stood still (the architect, 2026-10-25). A thousandth of a second
+# given up thirty times a second is three per cent of the run, and the longest the
+# window then waits is the gap between two snapshots.
+YIELD = 0.001
 
 # Where a run is, as a snapshot says it.
 NOTHING = "nothing"  # no program is open
@@ -196,7 +215,7 @@ class RunController:
     """One thread, one machine, one way in and one way out."""
 
     def __init__(self, tell, out=None, errors=None, every: float = EVERY,
-                 speed: float | None = None) -> None:
+                 speed: float | None = None, waits: bool = False) -> None:
         self.tell = tell  # called IN THE THREAD OF THE RUN with every event
         # The input of the program is always `Waiting`: a window has no standard
         # input to read, and the answer comes from whoever owns its main loop. What
@@ -210,6 +229,20 @@ class RunController:
         # all for as fast as it can. A machine that runs at a million instructions
         # a second cannot be watched; one that runs at five can.
         self.speed = speed
+        # Whether the loop WAITS TO BE HEARD before it says anything again.
+        #
+        # Whoever is told a snapshot answers for it - a window builds tables and
+        # paints pictures - and if it is told oftener than it can answer, the
+        # telling piles up in front of it and it is buried in work it cannot
+        # refuse. Measured with the text segment open and a program running at the
+        # speed of the machine: the main loop of the window never came up for air
+        # (2026-10-25). So whoever is told says `heard()` when it has finished with
+        # a snapshot, and until then nothing more is sent: a window that can answer
+        # five times a second is told five times a second, and the RUN goes on at
+        # its own speed either way - only the telling waits. Whoever does not say
+        # so, a test or a script, is told as often as `every` allows.
+        self.waits = waits
+        self._heard = True
         # Questions answered with every snapshot of a movement, by name, so that
         # whoever is watching a slowed run sees the machine change and not only
         # where it stands. They are answered IN THE THREAD OF THE RUN like any
@@ -279,6 +312,12 @@ class RunController:
     def restart(self) -> None:
         self.waiting.forget()
         self._movement("restart", lambda session: session.restart())
+
+    def heard(self) -> None:
+        """Whoever is being told has finished with the last snapshot and is ready
+        for another. It is said from the thread that was told, which is the one
+        thread that writes this (see `waits`)."""
+        self._heard = True
 
     def look(self) -> None:
         """Ask for a snapshot of where things are now. A window wants one when it
@@ -450,15 +489,21 @@ class RunController:
         if self.speed:
             self._held_back()
         now = time.monotonic()
-        if now - self._said < self.every:
+        if now - self._said < self.every or (self.waits and not self._heard):
             return
         self._said = now
-        self.tell(self._shot())
+        self._heard = False
+        # The answers for what is being watched first and the snapshot LAST, so
+        # that the snapshot is the end of a batch: whoever is told says it has
+        # heard when it has that one, and by then it has had all of them.
         self._watched()
-        # And give way. The loop of the machine is Python, so it holds the
-        # interpreter until it is taken from it; whoever is being told these
-        # snapshots has to be able to answer a pointer while they arrive.
-        time.sleep(0)
+        self.tell(self._shot())
+        # And give way, REALLY (see `YIELD`). A run that is being held back to a
+        # speed gives way by being slow - it sleeps between its instructions - and
+        # is left alone here, so that the pace it was asked for is the pace it
+        # keeps.
+        if not self.speed:
+            time.sleep(YIELD)
 
     def _world_now(self) -> None:
         """Whatever the world outside asked of a device, IN THE THREAD OF THE RUN,
