@@ -116,3 +116,16 @@ class Model:
         order a reader wants them. A device of someone else answers for itself, so
         nothing that shows devices has to know any of them."""
         return {}
+
+    def looks(self) -> dict[str, object]:
+        """What a front end needs to DRAW the device, in numbers.
+
+        `state` is what to READ about a device - words a person reads in a row of a
+        table - and for most devices that is the whole of it. A device that is a
+        PICTURE, though, cannot be read: a bitmap display is its units, a
+        seven-segment display is its segments, a disk is which block it is working
+        on. Those are the numbers, and no device knows anything about how they are
+        drawn; one that has nothing to draw says nothing here, and whoever shows
+        devices shows its table and no more.
+        """
+        return {}

@@ -11,12 +11,20 @@ The protocol is the one of RARS (R-DEV-KBD, read from the byte code of
 
 A key typed sets the ready bit of `RcvCtrl` and puts the key in `RcvData`; reading
 `RcvData` clears that ready bit, so the program sees each key once. By default only
-the last key typed is kept and the one before is lost if the program did not read
-it, exactly as in RARS; `queue` says how many keys the keyboard can hold at once,
-and a larger number keeps the rest waiting until the program takes them (DEV-58).
+the last key typed is kept and the one before is LOST if the program did not read
+it, exactly as in RARS - and every one lost that way is counted (`lost`), which
+RARS does not do because it counts nothing, and which is how whoever is watching
+sees that a program polling now and then misses what was typed in between. `queue`
+says how many keys the keyboard can hold at once, and a larger number keeps the
+rest waiting until the program takes them (DEV-58).
 A front-end that feeds a text asks `room` whether it may type without losing
 anything, or hands over a `feed` of its own and lets the keyboard take a key
 whenever it has room.
+
+A character written while the display is still busy with the one before is GONE,
+as in RARS, and counted (`dropped`): that is the same lesson from the other side -
+a program that writes faster than the display shows loses what it wrote, as one
+that reads slower than a hand types loses what was typed.
 
 Writing `TxData` while the display is ready clears the ready bit and starts a
 delay, counted in instructions carried out (which is what replaces the text-fetch
@@ -39,6 +47,7 @@ The display of RARS is as large as its window; a model has no window, so the siz
 is an option, 80 by 25 by default (DEV-56).
 """
 
+from collections import deque
 from collections.abc import Callable
 
 from pyrars.devices.base import Connection, Model
@@ -70,6 +79,13 @@ TECHNIQUES = ("fixed", "uniform", "normal")
 ROWS = 25
 COLUMNS = 80
 
+# How many instructions pass between one letter of a line typed at the keyboard
+# and the next. A hand types at a RATE: twenty-five instructions is slow enough
+# that a program doing a little work between one key and the next misses letters,
+# and fast enough that a program which does nothing but ask catches every one -
+# which is the comparison this device is there to make.
+TYPING = 25
+
 
 class KeyboardDisplay(Model):
     """The keyboard and the display of one machine."""
@@ -81,7 +97,8 @@ class KeyboardDisplay(Model):
 
     def __init__(self, delay: int = DEFAULT_DELAY, technique: str = "fixed",
                  rows: int = ROWS, columns: int = COLUMNS,
-                 show_after_delay: bool = True, queue: int = 1) -> None:
+                 show_after_delay: bool = True, queue: int = 1,
+                 typing: int = TYPING) -> None:
         super().__init__()
         if technique not in TECHNIQUES:
             raise ValueError(f'"{technique}": the delay is {" or ".join(TECHNIQUES)}')
@@ -89,9 +106,12 @@ class KeyboardDisplay(Model):
             raise ValueError("a delay, a number of rows and of columns are all at least 1")
         if queue < 1:
             raise ValueError("the keyboard holds at least one key")
+        if typing < 1:
+            raise ValueError("a letter is typed every instruction at the soonest")
         self.queue = queue  # keys it can hold at once; 1 is what RARS keeps
         self.keys: list[int] = []  # the ones waiting behind the one in the register
         self.lost = 0  # keys that arrived with nowhere to wait
+        self.dropped = 0  # characters written while the display was busy
         self.delay = delay
         self.technique = technique
         self.rows = rows
@@ -107,6 +127,13 @@ class KeyboardDisplay(Model):
         self.limit = 0
         self.waiting = 0  # the word whose character is to be shown
         self.source: Callable[[], str | None] | None = None  # where keys come from
+        # A HAND typing: the letters still to be typed, and how many instructions
+        # have been carried out since the last one went in. A hand types at a rate
+        # and does not look to see whether the program has read the letter before
+        # (`type_out`).
+        self.typing = typing
+        self.typing_out: deque[str] = deque()
+        self.typed_at = 0
         self.watchers: list[Callable[[], None]] = []
 
     # ------------------------------------------------------------- the machine
@@ -114,6 +141,12 @@ class KeyboardDisplay(Model):
     def reset(self) -> None:
         self.keys = []
         self.lost = 0
+        self.dropped = 0
+        # A fresh run is not owed what was typed at the last one, and a hand that
+        # was in the middle of a line is not still typing it (the rule of a
+        # restart, 2026-10-21).
+        self.typing_out.clear()
+        self.typed_at = 0
         self.text = ""
         self.grid = []
         self.place = (0, 0)
@@ -143,7 +176,15 @@ class KeyboardDisplay(Model):
         if address != self._address(TRANSMITTER_DATA):
             return  # a control register: the program sets its own bits
         if not self._register(TRANSMITTER_CONTROL) & READY:
-            return  # the display is busy; the character is lost, as in RARS
+            # The display is busy with the character before: this one is GONE, as
+            # in RARS, and counted - the other half of the lesson of this device.
+            # A program that writes faster than the display shows loses what it
+            # wrote, exactly as one that reads slower than a hand types loses what
+            # was typed, and neither can be seen happening unless somebody counts
+            # it (the architect, 2026-10-26).
+            self.dropped += 1
+            self._changed()
+            return
         self._control(TRANSMITTER_CONTROL,
                       self._register(TRANSMITTER_CONTROL) & ~READY)
         self.waiting = self.connection.memory.peek(self._address(TRANSMITTER_DATA), 4)
@@ -157,8 +198,13 @@ class KeyboardDisplay(Model):
         self.limit = self._delay()
 
     def on_retire(self, count: int) -> None:
-        """Instructions have been carried out: a key may be typed and the delay of
-        the display runs on."""
+        """Instructions have been carried out: a hand types on, a key may be taken
+        from a file, and the delay of the display runs on."""
+        if self.typing_out:
+            self.typed_at += count
+            while self.typing_out and self.typed_at >= self.typing:
+                self.typed_at -= self.typing
+                self.type_key(self.typing_out.popleft())
         if self.source is not None and self.room:
             key = self.source()
             if key is not None:
@@ -177,6 +223,26 @@ class KeyboardDisplay(Model):
             self.connection.interrupts.external(DISPLAY_INTERRUPT)
 
     # ------------------------------------------------------- the front-end side
+
+    def type_out(self, text: str) -> None:
+        """A HAND typing at the machine: a letter every `typing` instructions,
+        whether the program has read the one before or not.
+
+        This is what a line typed at the device means, and it is what the device is
+        FOR: a program that asks for a key oftener than that loses nothing, and one
+        that does more than `typing` instructions\' worth of work between asking
+        loses letters - and is told how many (`lost`). The architect, 2026-10-26:
+        «рука, печатающая по букве каждые N выполненных инструкций, отдающая букву
+        независимо от того, есть ли место ... Вот это правильное поведение
+        клавиатуры».
+
+        It is counted in INSTRUCTIONS and not in time, so the same program loses
+        the same letters twice over (INV-D). Nothing is typed while the machine
+        stands still, for the same reason a display shows nothing then: there are
+        no instructions to count.
+        """
+        self.typing_out.extend(text)
+        self._changed()
 
     def feed(self, source: Callable[[], str | None]) -> None:
         """Where keys come from while the machine runs: a front-end with a text to
@@ -202,7 +268,17 @@ class KeyboardDisplay(Model):
         self._changed()
 
     def _deliver(self, code: int) -> None:
-        """A key goes into the register, and the program hears of it if it asked."""
+        """A key goes into the register, and the program hears of it if it asked.
+
+        A key that was in there and was never read is GONE, and is counted. RARS
+        overwrites it in just the same way and counts nothing, because it has no
+        counter at all; ours is what lets anybody watching SEE the thing this
+        device is for - that a program which polls now and then misses what was
+        typed in between (the architect, 2026-10-26: "смысл системы - показать,
+        что опрос происходит не постоянно и что можно терять символы").
+        """
+        if not self.waiting_for_a_key:
+            self.lost += 1
         self._poke(RECEIVER_DATA, code)
         control = self._register(RECEIVER_CONTROL) | READY
         self._control(RECEIVER_CONTROL, control)
@@ -218,9 +294,20 @@ class KeyboardDisplay(Model):
             "key waiting": not self.waiting_for_a_key,
             "keys queued": len(self.keys),
             "keys lost": self.lost,
+            "characters lost": self.dropped,
+            "being typed": len(self.typing_out),
+            "typing": f"a letter every {self.typing} instructions",
             "display busy": self.counting,
             "delay": f"{self.delay} ({self.technique})",
         }
+
+    def looks(self) -> dict[str, object]:
+        """What the display holds, and how much of it there is: a display is read,
+        so its picture is its text."""
+        return {"text": self.shown(), "columns": self.columns, "rows": self.rows,
+                "queued": len(self.keys), "lost": self.lost,
+                "dropped": self.dropped, "being typed": len(self.typing_out),
+                "busy": self.counting}
 
     @property
     def waiting_for_a_key(self) -> bool:

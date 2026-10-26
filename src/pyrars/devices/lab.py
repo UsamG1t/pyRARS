@@ -143,6 +143,15 @@ class DigitalLab(Model):
             "counter": "off" if not self.counter_on else f"{self.counter} to go",
         }
 
+    def looks(self) -> dict[str, object]:
+        """The two displays as the bits they hold, the key that is down, and the
+        counter: everything a picture of the lab is made of."""
+        return {"left": self.left, "right": self.right,
+                "segments": SEGMENTS, "keys": KEYS,
+                "key": -1 if self.pressed is None else self.pressed,
+                "counting": self.counter_on, "counter": self.counter,
+                "period": PERIOD, "keys tell": self.key_interrupts}
+
     def lit(self, value: int) -> tuple[str, ...]:
         """Which segments a display holds, for whoever draws it."""
         return tuple(name for index, name in enumerate(SEGMENTS) if value >> index & 1)

@@ -13,4 +13,10 @@ pythonpath = ["src"]
 testpaths = ["tests"]
 markers = [
     "devel: differential test against RARS (needs `java` and tests/devel/rars1_6.jar)",
+    "ui: a test of the window (needs PyGObject, GTK 4 and a display)",
+]
+# PyGObject warns about asyncio on every import of its event glue, which is its
+# business and not ours; nothing else is hidden, so a warning of our own still shows.
+filterwarnings = [
+    "ignore::DeprecationWarning:gi.events",
 ]

@@ -30,9 +30,10 @@ ALLOWED = {
     "devices": {"devices", "core", "asm", "isa", "softfloat"},
     "analysis": {"analysis", "core", "asm", "isa", "softfloat"},
     "session": {"session", "devices", "analysis", "core", "asm", "isa", "softfloat"},
-    "ui": {"ui", "session", "devices", "analysis", "core", "asm", "isa", "softfloat"},
-    "cli": {"cli", "console", "session", "devices", "analysis", "core", "asm", "isa",
-            "softfloat"},
+    "ui": {"ui", "values", "session", "devices", "analysis", "core", "asm", "isa",
+           "softfloat"},
+    "cli": {"cli", "console", "values", "session", "devices", "analysis", "core",
+            "asm", "isa", "softfloat"},
 }
 
 

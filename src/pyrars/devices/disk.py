@@ -141,6 +141,13 @@ class BlockDevice(Model):
             "refused": self.error,
         }
 
+    def looks(self) -> dict[str, object]:
+        """Which block it is working on, and how many are left: a disk at work is
+        a row of blocks with one of them lit."""
+        return {"blocks": self.blocks, "at": self.block, "left": self.left,
+                "working": self.busy, "writing": self.writing,
+                "refused": self.error}
+
     def load(self, data: bytes) -> None:
         """Put an image on the disk: what a command line does before a run."""
         if len(data) != len(self.image):

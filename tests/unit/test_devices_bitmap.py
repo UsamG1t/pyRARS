@@ -28,6 +28,33 @@ def screen(**options) -> tuple[Machine, BitmapDisplay]:
     return machine, device
 
 
+# ------------------------------------------------------- what it looks like
+
+
+def test_what_the_display_looks_like_is_the_bytes_of_an_image():
+    """`state` is what to read ABOUT the display; `looks` is the picture itself,
+    which is the one thing a table of words cannot say - and it is handed over as
+    the BYTES of the words, which is one copy of memory and no work at all."""
+    from array import array
+
+    # a word of memory is four bytes of the image, and that is what the whole of
+    # this rests on: the picture is drawn straight from them
+    assert array("I").itemsize == 4
+    # twelve pixels across in units of three is four units across, as RARS counts
+    machine, device = screen(width=12, height=10, unit_width=3, unit_height=5)
+    machine.memory.write(device.base, 4, 0xFF0000)
+    machine.memory.write(device.base + 4, 4, 0x00FF00)
+    looks = device.looks()
+    # blue, green, red, unused - the word as this machine holds it
+    assert looks["pixels"][:8] == bytes((0x00, 0x00, 0xFF, 0x00,
+                                         0x00, 0xFF, 0x00, 0x00))
+    assert len(looks["pixels"]) == 8 * 4  # four bytes to each of eight units
+    assert (looks["columns"], looks["rows"]) == (4, 2)
+    assert (looks["unit_width"], looks["unit_height"]) == (3, 5)
+    # a copy, because whoever draws it has a thread of its own
+    assert looks["pixels"] is not device.frame
+
+
 # ------------------------------------------------------------------- the place
 
 
@@ -104,7 +131,7 @@ def test_a_word_written_reaches_the_picture():
 def test_a_word_outside_the_picture_is_no_part_of_it():
     machine, device = screen(width=2, height=2)
     machine.memory.write(device.base + 4 * 4, 4, 0x123456)
-    assert device.frame == [0, 0, 0, 0]
+    assert list(device.frame) == [0, 0, 0, 0]
 
 
 def test_a_byte_written_takes_the_whole_word_with_it():
@@ -120,15 +147,15 @@ def test_the_picture_starts_as_the_memory_holds_it():
     """A program whose data is already there sees it from the first moment."""
     base = DEFAULT.data_base
     machine, device = screen(width=2, height=1, before=((base, 0x010000), (base + 4, 2)))
-    assert device.frame == [0x010000, 2]
+    assert list(device.frame) == [0x010000, 2]
 
 
 def test_a_reset_reads_the_memory_again():
     machine, device = screen(width=2, height=1)
     machine.memory.poke(device.base, 4, 0x314159)  # nobody was told
-    assert device.frame == [0, 0]
+    assert list(device.frame) == [0, 0]
     device.reset()
-    assert device.frame == [0x314159, 0]
+    assert list(device.frame) == [0x314159, 0]
 
 
 def test_the_range_watched_is_cut_off_at_the_end_of_the_memory():

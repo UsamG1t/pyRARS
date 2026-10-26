@@ -21,7 +21,8 @@ A change made by `set` or `poke` is not a step of the machine, so a step back do
 not undo it; the answer of the command says so (the rule of the journal, stage 21).
 """
 
-from dataclasses import dataclass, field, replace
+from collections import deque
+from dataclasses import dataclass, field, fields, replace
 
 from pyrars.analysis.cache import Caches
 from pyrars.analysis.callstack import CallStack, Frame
@@ -53,7 +54,8 @@ CLIFF = "cliff"
 LIMIT = "limit"
 WAITING = "waiting"
 TRAPPED = "trapped"
-PAUSED = "paused"
+PAUSED = "paused"  # the machine stands, and the run may go on from there
+STOPPED = "stopped"  # the run was told to end where it was
 NOTHING = "nothing"  # there was nothing to do
 ENDED = "ended"  # the run is over, and nothing but a restart or a step back follows
 
@@ -65,7 +67,7 @@ REASONS = {
     StopReason.EXCEPTION: TRAPPED,
     StopReason.BREAKPOINT: BREAKPOINT,
     StopReason.PAUSE: PAUSED,
-    StopReason.STOP: PAUSED,
+    StopReason.STOP: STOPPED,
 }
 
 
@@ -199,11 +201,21 @@ class FrameSeen:
 
 
 @dataclass(frozen=True, slots=True)
+class Kept:
+    """What a device is HOLDING, as against what it is doing: the image of a disk,
+    for whoever means to write it somewhere."""
+
+    name: str
+    data: bytes
+
+
+@dataclass(frozen=True, slots=True)
 class DeviceSeen:
     name: str
     offset: int | None
     size: int | None
-    state: dict[str, object]
+    state: dict[str, object]  # what to READ about it, in its own words
+    looks: dict[str, object] = field(default_factory=dict)  # and what to DRAW it by
 
 
 @dataclass(frozen=True, slots=True)
@@ -233,6 +245,97 @@ class GuesserEntry:
     taken: bool
     right: int
     wrong: int
+
+
+@dataclass(frozen=True, slots=True)
+class Setting:
+    """One thing a model was built with, or one thing it counted, by name.
+
+    A model is built from a dataclass of its own and counts whatever it counts;
+    what every front end does with it is the same - puts the name beside the value
+    - so the session hands it over in that shape and neither of them has to know
+    the fields of a model by heart.
+    """
+
+    name: str
+    value: object
+
+
+@dataclass(frozen=True, slots=True)
+class CacheSeen:
+    """One cache of a run: how it was built, and how it has fared."""
+
+    side: str  # "cache" where there is one for everything, else "data"/"instructions"
+    fetches: bool  # whether the addresses of the instructions reach this one
+    settings: tuple[Setting, ...]
+    accesses: int
+    hits: int
+    misses: int
+    rate: float
+    writebacks: int
+    through: int
+
+
+@dataclass(frozen=True, slots=True)
+class Cycle:
+    """Where the model of the pipeline is being looked at."""
+
+    now: int  # the cycle on show; -1 until somebody has asked for one
+    cycles: int  # how many of them the model knows about
+    stepped: int  # instructions the machine had to carry out to find this one out
+    ended: bool  # whether the run is over, so that no more cycles will come
+
+
+@dataclass(frozen=True, slots=True)
+class PipelineSeen:
+    """The time a run would have taken, as the model of it counted."""
+
+    cycle: int  # the cycle being looked at, or -1 for none
+    settings: tuple[Setting, ...]
+    cycles: int
+    instructions: int
+    cpi: float
+    lost: int  # cycles nothing was carried out in
+    stalls: tuple[Setting, ...]  # by what caused them
+    branches: int
+    wrong: int  # branches guessed wrongly
+
+
+@dataclass(frozen=True, slots=True)
+class StageSeen:
+    """Where one instruction was in which cycle, as a diagram shows it."""
+
+    address: int
+    mnemonic: str
+    starts: tuple[int, ...]  # the cycle each of the five stages began in
+    ex_cycles: int
+    waited: int
+
+
+@dataclass(frozen=True, slots=True)
+class GuesserSeen:
+    """How the machine of the model guessed where the branches went."""
+
+    name: str
+    settings: tuple[Setting, ...]  # the entries and the bits, where it has them
+    guesses: int
+    right: int
+    wrong: int
+    accuracy: float
+
+
+@dataclass(frozen=True, slots=True)
+class StatisticsSeen:
+    """What a run was made of."""
+
+    turns: int
+    instructions: int
+    traps: int
+    unknown: int
+    taken: int  # branches that went
+    not_taken: int
+    kinds: tuple[Setting, ...]  # by the kind of instruction, the unmet left out
+    categories: tuple[Setting, ...]  # and by the five RARS counts by
 
 
 @dataclass(frozen=True, slots=True)
@@ -281,16 +384,19 @@ class Session:
         self._ends: dict[int, object] = {}  # how to end a watch
         self._next_id = 1
         self._pending: list[tuple[int, MemAccess]] = []
+        # What has been typed at a device and not read by the program yet, by the
+        # name of the device (`fed`). It is of the SESSION and not of the device,
+        # because the device takes one letter at a time and whoever types does not.
+        self._typing: dict[str, deque] = {}
         self._touched: list[Touched] = []
         # Whether the run is over. A program that has exited, run off the end of
         # its text or trapped with nowhere to go does not go on, and a movement
         # says so instead of wandering: the way back is a restart - or a step
         # back, for the journal reaches over the end of a run like anywhere else.
         self.ended = False
-        # Where the world outside stood when the session began, so that a restart
-        # can put it back: the program reads the same input again, as it does after
-        # a step back under `Options.debug` (the decision of stage 21).
-        self._start = self.io.mark()
+        # Which cycle of the model of the pipeline is being looked at; -1 is none,
+        # which is where every run begins.
+        self.cycle_now = -1
         self._build()
 
     # ------------------------------------------------------------- the machine
@@ -315,7 +421,15 @@ class Session:
 
     def restart(self) -> Stopped:
         """The program from the beginning. What was asked to be watched stays; what
-        the models counted is forgotten."""
+        the models counted is forgotten.
+
+        The world outside is NOT put back with it (user decision 2026-10-21): a
+        restart is a fresh run, and a program that asks for a line asks again. It
+        was the other way at first - a restart put back what had been read, by the
+        same reasoning as a step back - and it read as the program silently not
+        asking, which is no use to anybody watching. A step back is unchanged:
+        stepping back and forward again must give the same thing twice.
+        """
         for end in self._ends.values():
             end()
         self._ends.clear()
@@ -324,7 +438,13 @@ class Session:
         self._watches = {number: replace(watch, hits=0)
                          for number, watch in self._watches.items()}
         self.ended = False
-        self.io.rewind(self._start)
+        self.cycle_now = -1  # a fresh run is at no cycle of the model either
+        # And nothing typed at the last run is owed to this one. The deques are
+        # emptied and not only let go of: a device that was fed holds on to the
+        # one it was given, and would go on typing out of it.
+        for waiting in self._typing.values():
+            waiting.clear()
+        self._typing.clear()
         self._build()
         return Stopped(NOTHING, self.where())
 
@@ -685,13 +805,116 @@ class Session:
         if self.bus is None:
             return []
         return [DeviceSeen(part.name, getattr(part, "offset", None),
-                           getattr(part, "size", None), part.state())
+                           getattr(part, "size", None), part.state(),
+                           part.looks() if hasattr(part, "looks") else {})
                 for part in self.bus.parts]
 
     def device(self, name: str) -> DeviceSeen:
         for seen in self.devices():
             if seen.name == name:
                 return seen
+        raise ValueError(f'"{name}": no device of that name is attached')
+
+    def press(self, name: str, key: int) -> DeviceSeen:
+        """Press a key of a device, as somebody standing at the machine would.
+
+        This and the four that follow are the world outside reaching IN - the other
+        way from everything else here - and none of them is a step of the machine:
+        the journal knows nothing of them, exactly as `set` and `poke` are not
+        steps either (the rule of the journal, stage 21). A key of the digital lab
+        that is already down goes up instead, because the keys of that lab are
+        buttons that stay down; that is the device's own doing and not this
+        method's.
+        """
+        self._able(name, "press", "that device has no keys to press")(key)
+        return self.device(name)
+
+    def typed(self, name: str, text: str) -> DeviceSeen:
+        """Type at a device as a HAND does: a letter every so many instructions,
+        whether the program has read the one before or not.
+
+        This is what a line typed into a window means, and it is deliberately the
+        LOSING way (the architect, 2026-10-26). The device types the line out at
+        its own rate (`KeyboardDisplay.type_out`, which `typing` sets), and a
+        keyboard of one key - RARS's, and ours by default - holds the last letter
+        and loses the ones the program never read. So a program that does nothing
+        but ask for keys catches every letter, and one that does a little work
+        between asking loses some, and is told how many. That is the whole lesson
+        of the device: the asking is not continuous, and what nobody asked for in
+        time is gone.
+
+        `fed` is the other way, for a FILE prepared beforehand: nothing is lost
+        there, because the device takes a letter only when it has room for one.
+        """
+        self._able(name, "type_out", "that device takes no keys typed")(text)
+        return self.device(name)
+
+    def fed(self, name: str, text: str) -> DeviceSeen:
+        """Give a device a text to type from: it takes a letter whenever it has
+        room, so nothing of it is lost.
+
+        This is for a FILE of keys prepared beforehand, which is what the command
+        line gives a keyboard (`--device keyboard:keys=...`); a line typed by hand
+        goes the other way, through `typed`, where it can be lost.
+
+        What is given waits its turn behind whatever was given before and not read
+        yet, so a second file given while the program is still reading the first
+        does not take its place.
+        """
+        feeding = self._able(name, "feed", "that device takes no text to type")
+        waiting = self._typing.setdefault(name, deque())
+        waiting.extend(text)
+        feeding(lambda: waiting.popleft() if waiting else None)
+        return self.device(name)
+
+    def put_on(self, name: str, data: bytes) -> DeviceSeen:
+        """Put an image on a device that holds one: the blocks of a disk.
+
+        The device says what is wrong with an image of the wrong size, because the
+        size is the device's own (`BlockDevice.load`).
+        """
+        self._able(name, "load", "that device holds no image")(data)
+        return self.device(name)
+
+    def image_of(self, name: str) -> Kept:
+        """What a device is holding, to be written somewhere: the image of a disk.
+
+        A QUESTION and not a change, and asked for only when somebody asks: the
+        image of a disk is half a megabyte by default, and nothing of it belongs in
+        a snapshot.
+        """
+        return Kept(name, self._able(name, "saved",
+                                     "that device holds no image")())
+
+    def ticking(self, name: str, on: bool) -> DeviceSeen:
+        """Start or stop the clock of a device by hand, as the timer of RARS lets
+        one: a program that reads the time can then be shown reading a time that
+        does not move."""
+        self._able(name, "play" if on else "pause",
+                   "that device has no clock to start or stop")()
+        return self.device(name)
+
+    def _able(self, name: str, what: str, said: str):
+        """The one thing a device can be asked to DO under that name - or a word
+        about why it cannot, in the same shape for every one of them.
+
+        It must be something to call: a device may hold a FIELD of that name and
+        mean something else by it entirely (the timer keeps the time it was
+        stopped at in `saved`, where a disk answers with its image under the same
+        name), and asking a number to do something is not a question a device
+        should be troubled with.
+        """
+        doing = getattr(self._attached(name), what, None)
+        if not callable(doing):
+            raise ValueError(f'"{name}": {said}')
+        return doing
+
+    def _attached(self, name: str):
+        """The device of a name, as the object it is - for the few things that are
+        done TO a device rather than read off it."""
+        for part in self.bus.parts if self.bus is not None else ():
+            if part.name == name:
+                return part
         raise ValueError(f'"{name}": no device of that name is attached')
 
     def cache_lines(self) -> list[CacheLine]:
@@ -708,6 +931,95 @@ class Session:
                     found.append(CacheLine(side, index, place, line.tag, low,
                                            low + bytes_of - 1, line.dirty))
         return found
+
+    def caches(self) -> list[CacheSeen]:
+        """The caches of the run, as they were built and as they have fared."""
+        caches = self.models.caches
+        if caches is None:
+            return []
+        return [CacheSeen(side, self.models.fetches if side != "data" else False,
+                          _settings(cache.settings), cache.accesses, cache.hits,
+                          cache.misses, cache.hit_rate, cache.writebacks,
+                          cache.through)
+                for side, cache in caches.each().items()]
+
+    def pipeline(self) -> PipelineSeen | None:
+        """What the model of the time counted, where a run was watched by one."""
+        model = self.models.pipeline
+        if model is None:
+            return None
+        return PipelineSeen(self.cycle_now, _settings(model.settings), model.cycles,
+                            model.instructions, model.cpi, model.lost,
+                            tuple(Setting(cause, many)
+                                  for cause, many in sorted(model.stalls.items())),
+                            model.branches, model.mispredictions)
+
+    def cycle_on(self, count: int = 1) -> Cycle:
+        """On by one cycle of the MODEL of the pipeline.
+
+        A cycle is no step of the machine. The model is a model of TIME over a run
+        that has already happened (INV-P), so to know what is in the pipeline at
+        the next cycle the machine is carried on - one instruction at a time, and
+        no further than it must be. Six steps of the machine and twenty-five cycles
+        of the model are the same five instructions (the architect, 2026-10-23), and
+        this is what lets somebody watch the second of those.
+
+        What is DRAWN of an instruction is its whole way through the five stages,
+        because the run has happened and the model knows it; a real machine at that
+        cycle would not know yet. That is what a model of time is, and whoever
+        shows one says so.
+        """
+        model = self.models.pipeline
+        if model is None:
+            raise ValueError("no pipeline was asked for, so there are no cycles "
+                             "to walk")
+        wanted = self.cycle_now + max(count, 1)
+        stepped = 0
+        # On until an instruction has been FETCHED after the cycle wanted: only
+        # then is everything that is in flight in that cycle known, and the
+        # diagonal of it whole. So the machine runs a pipeline's depth ahead of
+        # what is being looked at, which is the price of a model of time.
+        while model.fetching <= wanted and not self.ended:
+            before = self.simulator.count
+            self.step()
+            stepped += 1
+            if self.simulator.count == before:
+                break  # the machine went nowhere: no more cycles will ever come
+        # Never past the last cycle the model knows of - and where it knows of
+        # none at all, no cycle is being looked at.
+        self.cycle_now = min(wanted, model.cycles - 1)
+        return Cycle(self.cycle_now, model.cycles, stepped, self.ended)
+
+    def diagram(self) -> list[StageSeen]:
+        """The diagram the model kept, as far back as it was told to keep it."""
+        model = self.models.pipeline
+        if model is None:
+            return []
+        return [StageSeen(row.pc, row.mnemonic, tuple(row.starts), row.ex_cycles,
+                          row.waited) for row in model.diagram]
+
+    def guesser(self) -> GuesserSeen | None:
+        model = self.models.pipeline
+        if model is None:
+            return None
+        guesser = model.predictor
+        return GuesserSeen(guesser.name,
+                           tuple(Setting(name, getattr(guesser, name))
+                                 for name in ("entries", "bits")
+                                 if hasattr(guesser, name)),
+                           guesser.guesses, guesser.right, guesser.wrong,
+                           guesser.accuracy)
+
+    def statistics(self) -> StatisticsSeen | None:
+        """What the run was made of, where a run was counted at all."""
+        counted = self.models.statistics
+        if counted is None:
+            return None
+        return StatisticsSeen(
+            counted.turns, counted.instructions, counted.traps, counted.unknown,
+            counted.taken, counted.not_taken,
+            tuple(Setting(name, many) for name, many in counted.kinds().items()),
+            tuple(Setting(name, many) for name, many in counted.categories().items()))
 
     def guesser_entries(self) -> list[GuesserEntry]:
         """The entries of a table of history, where the pipeline guesses with one."""
@@ -779,6 +1091,12 @@ class Session:
         if quiet:
             return None
         raise ValueError(f'"{name}": no floating point register of that name')
+
+
+def _settings(settings) -> tuple[Setting, ...]:
+    """What a model was built with, in the order its own dataclass declares it."""
+    return tuple(Setting(one.name, getattr(settings, one.name))
+                 for one in fields(settings))
 
 
 def _fields(name: str, value: int) -> str:

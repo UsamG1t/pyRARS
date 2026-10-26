@@ -172,6 +172,13 @@ class DirectAccess(Model):
             "refused": self.error,
         }
 
+    def looks(self) -> dict[str, object]:
+        """How far the copying has got, which is the one thing a program waiting on
+        it wants to see. `from` and `to` are where it has got TO, not where it was
+        told to begin: those two registers walk as it copies."""
+        return {"copied": self.copied, "left": self.left, "copying": self.busy,
+                "from": self.source, "to": self.target, "refused": self.error}
+
     def subscribe(self, callback: Callable[[], None]) -> Callable[[], None]:
         self.watchers.append(callback)
 

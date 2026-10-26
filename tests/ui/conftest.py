@@ -1,0 +1,89 @@
+"""What a test of the window needs before it can build one.
+
+The marker is `ui`, and it skips where there is no GTK and no display, exactly as
+`devel` skips where there is no jar: the suite must run on a machine that has no
+window system at all.
+"""
+
+import pytest
+
+
+@pytest.fixture
+def gtk():
+    """GTK itself, or a skip. Answers with the main context, which a test turns by
+    hand because there is no application running one."""
+    gi = pytest.importorskip("gi", reason="the window needs PyGObject")
+    gi.require_version("Gtk", "4.0")
+    gi.require_version("Adw", "1")
+    from gi.repository import Adw, GLib, Gtk
+
+    if not Gtk.init_check():
+        pytest.skip("the window needs a display")
+    Adw.init()
+    return GLib.MainContext.default()
+
+
+@pytest.fixture(autouse=True)
+def nobody_elses_settings(tmp_path, monkeypatch):
+    """The settings of a RUN belong to the person, and a test is not the person.
+
+    A window reads them from where a desktop keeps such things, so every test of
+    one is given a folder of its own: otherwise the suite would read whatever the
+    person running it had set, and write over it.
+    """
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
+
+
+@pytest.fixture
+def turning(gtk):
+    """Turn the main loop until something is true, or say that it never was.
+
+    Every event of the controller arrives through `GLib.idle_add`, so a test that
+    does not turn the loop sees nothing; and one that turns it for ever would hang,
+    so this one always ends.
+    """
+    import time
+
+    def turn(whether, timeout: float = 5.0) -> bool:
+        end = time.monotonic() + timeout
+        while time.monotonic() < end:
+            # A bounded number of events at a time: a program without an end keeps
+            # the loop fed for ever, and a drain that waited for quiet would never
+            # look at the clock again (stage 45).
+            for _ in range(500):
+                if not gtk.pending():
+                    break
+                gtk.iteration(False)
+            if whether():
+                return True
+            time.sleep(0.002)
+        return False
+
+    return turn
+
+
+@pytest.fixture
+def showing(gtk, turning):
+    """Put a widget in a window and let GTK lay it out.
+
+    Almost nothing needs this: a widget answers about itself without being seen.
+    What does need it is anything that reads the COORDINATES of the pointer, which
+    mean nothing until there is something on the screen for them to be measured
+    against. The window is small and goes away again when the test is over.
+    """
+    from gi.repository import Gtk
+
+    windows = []
+
+    def show(widget):
+        window = Gtk.Window(default_width=420, default_height=220)
+        window.set_child(widget)
+        window.present()
+        windows.append(window)
+        turning(lambda: widget.get_width() > 0, 3.0)
+        return widget
+
+    yield show
+    for window in windows:
+        window.set_child(None)
+        window.destroy()

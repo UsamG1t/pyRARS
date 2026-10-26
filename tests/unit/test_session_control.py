@@ -18,9 +18,10 @@ import time
 import pytest
 
 from pyrars.session import project as projects
+from pyrars.devices import DeviceBus, make
 from pyrars.session.control import (
-    ASKING, ENDED, LOAD, NOTHING, RUNNING, STANDING, Answer, Failed, RunController,
-    Snapshot, Waiting)
+    ASKING, DEVICE, ENDED, LOAD, NOTHING, RUNNING, STANDING, WAITING, Answer,
+    Failed, RunController, Snapshot, Waiting)
 
 SUM = """\
 .globl main
@@ -61,6 +62,27 @@ main:   li a7, 8
         ecall
 """
 BROKEN = ".text\nmain: nonsense t0, t1\n"
+
+# The same program as `ECHOES` with a hundred instructions of work after every
+# letter: now the hand types faster than the program asks.
+SLOWLY = """\
+.globl main
+.text
+main:   li      s0, 0xffff0000
+wait:   lw      t0, 0(s0)
+        andi    t0, t0, 1
+        beq     t0, zero, wait
+        lw      t1, 4(s0)
+        li      t2, 10
+        beq     t1, t2, done
+        sw      t1, 12(s0)
+        li      t3, 50
+work:   addi    t3, t3, -1
+        bne     t3, zero, work
+        j       wait
+done:   li      a7, 10
+        ecall
+"""
 
 # Two to set up, three to a turn of the loop three times over, the call, the two
 # halves of `la` with the store and the return, and two before the exit; the
@@ -316,6 +338,404 @@ def test_a_step_back_reaches_over_a_run_that_was_stopped(control, told, tmp_path
     assert told.last.stopped.reason == "stepped"
 
 
+# ------------------------------------------------------------ on to a place
+
+
+def test_a_run_on_to_a_place_by_its_name(control, told, tmp_path):
+    """A window has a line of a file and not an address, so a place may be said
+    in words; the naming is done in the thread of the run, because that is where
+    the program is."""
+    opened(control, tmp_path)
+    control.until("keep")
+    assert control.settled()
+    assert told.last.place.line == 14  # `keep:   la t0, total`
+    assert told.last.instructions == 2 + 3 * 3 + 1
+
+
+def test_a_run_on_to_a_line_of_a_file(control, told, tmp_path):
+    opened(control, tmp_path)
+    control.until(f"{tmp_path / 'main.s'}:9")  # the `bne` of the first turn
+    assert control.settled()
+    assert told.last.place.line == 9
+    assert told.last.instructions == 4
+
+
+def test_a_run_on_to_an_address(control, told, tmp_path):
+    opened(control, tmp_path)
+    control.until(control.program.symbols["keep"])
+    assert control.settled()
+    assert told.last.place.line == 14
+
+
+def test_a_run_on_to_a_place_that_is_nowhere(control, told, tmp_path):
+    """A line with no instruction on it cannot be run to, and nothing of the run
+    changes because somebody asked."""
+    opened(control, tmp_path)
+    control.until(f"{tmp_path / 'main.s'}:2")  # `.data` is no instruction
+    assert control.settled()
+    assert told.failures[-1].what == "until"
+    assert "no instruction of the program is there" in told.failures[-1].message
+    assert told.last.instructions == 0
+
+
+# --------------------------------------------------------- the speed of a run
+
+
+def test_a_run_is_held_back_to_the_speed_it_was_given(told, tmp_path):
+    """Fifty a second means fifty a second: the whole program is eighteen
+    instructions, so it takes about a third of a second instead of no time at
+    all."""
+    with RunController(told, out=io.StringIO(), speed=50) as control:
+        opened(control, tmp_path)
+        began = time.monotonic()
+        control.carry_on()
+        assert control.settled(20)
+        took = time.monotonic() - began
+    assert told.last.instructions == WHOLE
+    assert took >= (WHOLE - 2) / 50  # the ceiling is kept
+    assert took < 4 * WHOLE / 50  # and nothing waits longer than it was told to
+
+
+def test_the_pace_is_counted_from_when_each_instruction_was_due(told, tmp_path):
+    """What a turn itself took is part of what that turn was given.
+
+    Here half of every interval goes on answering a watched question. A pace
+    counted from NOW instead of from when the last instruction was due would add
+    that half to the whole of every interval and take half as long again - and
+    would go on drifting with anything else the turn had to do.
+    """
+    def slowly(session):
+        time.sleep(0.01)
+        return session.count().instructions
+
+    with RunController(told, out=io.StringIO(), every=0, speed=50) as control:
+        opened(control, tmp_path)
+        control.watching = {"slowly": slowly}
+        began = time.monotonic()
+        control.carry_on()
+        assert control.settled(20)
+        took = time.monotonic() - began
+    assert told.last.instructions == WHOLE
+    assert (WHOLE - 2) / 50 <= took < 1.25 * WHOLE / 50
+
+
+def test_a_step_is_a_step_however_slow_the_run_is(told, tmp_path):
+    """A speed holds a RUN back; it does not make somebody who presses Step wait a
+    second to see what they did.
+
+    The turn is told of an instruction once it has been carried out, so the first
+    turn of every movement waits for nothing: five steps at twenty a second are
+    five steps and no waiting at all.
+    """
+    with RunController(told, out=io.StringIO(), speed=20) as control:
+        opened(control, tmp_path)
+        began = time.monotonic()
+        for _ in range(5):
+            control.step()
+        assert control.settled(20)
+        took = time.monotonic() - began
+    assert told.last.instructions == 5
+    assert took < 5 * 0.05 / 2  # five intervals would be a quarter of a second
+
+
+def test_a_run_at_no_speed_at_all_is_as_fast_as_it_can_be(control, told, tmp_path):
+    """Nothing is held back unless somebody asks for it; the loop pays one
+    comparison a turn for the asking."""
+    opened(control, tmp_path)
+    began = time.monotonic()
+    control.carry_on()
+    assert control.settled()
+    assert time.monotonic() - began < WHOLE / 50
+    assert told.last.instructions == WHOLE
+
+
+def test_a_run_that_stood_still_does_not_race_to_make_up_for_it(told, tmp_path):
+    """A slowed run that waited for a line owes nothing for the waiting.
+
+    The pace is counted from when the last instruction was DUE, so that it does
+    not drift; but a run that has fallen behind begins counting again from now.
+    Otherwise half a second of standing in the input would be repaid at the top
+    speed of the machine, which is the opposite of what a slow run is for.
+    """
+    with RunController(told, out=io.StringIO(), speed=10) as control:
+        opened(control, tmp_path, ASKS)
+        control.carry_on()
+        assert waited_for(lambda: control.state == WAITING)
+        time.sleep(0.5)  # half a second owed: five instructions at this speed
+        answered = time.monotonic()
+        control.answer("7")
+        assert control.settled(20)
+        after = time.monotonic() - answered
+    assert told.last.state == ENDED
+    assert after >= 0.15  # what was left was still carried out at ten a second
+
+
+def test_a_speed_may_be_changed_while_the_run_goes_on(told, tmp_path):
+    """It is read every turn, so a slider may be moved while a program runs."""
+    with RunController(told, out=io.StringIO()) as control:
+        opened(control, tmp_path, FOREVER)
+        control.carry_on()
+        assert waited_for(lambda: told.last.instructions > 1000)  # its own speed
+        control.speed = 5
+        time.sleep(0.2)  # whatever was in the air at the old speed
+        counted = told.last.instructions
+        time.sleep(0.6)
+        crawled = told.last.instructions - counted
+        control.stop()
+        assert control.settled()
+    # Three a second there or thereabouts, against the twenty thousand a second it
+    # was going at: what this has to tell apart is a HANDFUL from a torrent. There
+    # is no bound below, because the machine running the test may be busy with
+    # something else and give the thread of the run no turn at all in half a second
+    # (both bounds were tried and both flaked under the whole suite); that a slowed
+    # run moves at all is what the two tests above this one are for.
+    assert crawled <= 30
+
+
+# ----------------------------------------------------------- what is watched
+
+
+def test_what_is_watched_is_answered_with_every_snapshot(told, tmp_path):
+    """A window that slows a run down wants to see the machine change, and cannot
+    ask for it while the run goes on: a question would wait in the queue behind
+    the movement. So it is answered by the thread of the run itself."""
+    with RunController(told, out=io.StringIO(), every=0) as control:
+        opened(control, tmp_path)
+        control.watching = {"counted": lambda session: session.count().instructions}
+        control.step(5)
+        assert control.settled()
+    running = [one for one in told.snapshots if one.state == RUNNING]
+    assert [one.value for one in told.answers if one.what == "counted"] \
+        == [1, 2, 3, 4, 5]  # every turn, the instruction of that turn done
+    assert len(running) == 5
+
+
+def test_nothing_is_watched_unless_somebody_asks(control, told, tmp_path):
+    opened(control, tmp_path)
+    control.step(5)
+    assert control.settled()
+    assert control.watching == {}
+    assert [one.what for one in told.answers] == [LOAD]
+
+
+def test_a_watched_question_that_cannot_be_answered_is_let_go(told, tmp_path):
+    """Thirty of the same complaint a second say nothing a window can use, and the
+    run is none the worse for the asking."""
+    def throws(session):
+        raise ValueError("nothing like it")
+
+    with RunController(told, out=io.StringIO(), every=0) as control:
+        opened(control, tmp_path)
+        control.watching = {"broken": throws}
+        control.step(5)
+        assert control.settled()
+        assert control.watching == {}
+    assert [(one.what, one.message) for one in told.failures] \
+        == [("broken", "nothing like it")]
+    assert told.last.state == STANDING and told.last.instructions == 5
+
+
+# ------------------------------------------------------- the world outside
+
+# A program that waits for a key of the FIRST ROW of the digital lab (which is the
+# keys 0 to 3, for the keyboard answers about one row at a time) and stops once it
+# has one.
+WAITS_FOR_A_KEY = """\
+.globl main
+.text
+main:   li      s0, 0xffff0010
+        li      t0, 1
+look:   sb      t0, 2(s0)
+        lbu     t1, 4(s0)
+        beq     t1, zero, look
+        li      a7, 10
+        ecall
+"""
+
+
+def test_a_key_pressed_while_the_program_runs(told, tmp_path):
+    """The one moment a key matters: a program is RUNNING and polling for it. So
+    it does not wait in the queue of work - which is not looked at again until the
+    movement ends - but in a queue of its own that the thread empties every turn.
+    """
+    with RunController(told, out=io.StringIO(), speed=500) as control:
+        opened(control, tmp_path, WAITS_FOR_A_KEY, bus=DeviceBus([make("lab")]))
+        control.carry_on()
+        assert waited_for(lambda: control.state == RUNNING)
+        control.press("lab", 1)
+        assert control.settled(20)
+    assert told.last.state == ENDED  # the program saw the key and ended
+    answers = [one for one in told.answers if one.what == DEVICE]
+    assert answers and answers[-1].value.looks["key"] == 1
+
+
+def test_a_key_pressed_while_nothing_is_happening(control, told, tmp_path):
+    """The thread may be sitting on the queue of work with nothing to do, so a
+    nudge goes through that queue as well."""
+    opened(control, tmp_path, bus=DeviceBus([make("lab")]))
+    control.press("lab", 2)
+    assert control.settled()
+    answers = [one for one in told.answers if one.what == DEVICE]
+    assert len(answers) == 1
+    assert answers[0].value.state["key down"] == 2
+
+
+def test_a_key_that_cannot_be_pressed_while_the_program_runs(told, tmp_path):
+    """A press is done IN the loop of the run, so one that cannot be done must be
+    caught there: an error let out of that would end the movement and take the run
+    with it."""
+    with RunController(told, out=io.StringIO(), speed=500) as control:
+        opened(control, tmp_path, WAITS_FOR_A_KEY, bus=DeviceBus([make("lab")]))
+        control.carry_on()
+        assert waited_for(lambda: control.state == RUNNING)
+        control.press("keyboard", 1)  # nothing of that name is attached
+        assert waited_for(lambda: bool(told.failures))
+        assert control.state == RUNNING  # and the run is none the worse
+        control.press("lab", 1)
+        assert control.settled(20)
+    assert told.last.state == ENDED
+    assert [one.what for one in told.failures] == [DEVICE]
+
+
+# A program that reads keys from the keyboard and shows them on its display until
+# it is given a newline, and does NOTHING else in between: it asks for a key
+# oftener than any hand types.
+ECHOES = """\
+.globl main
+.text
+main:   li      s0, 0xffff0000
+wait:   lw      t0, 0(s0)       # is a key waiting?
+        andi    t0, t0, 1
+        beq     t0, zero, wait
+        lw      t1, 4(s0)       # the key, which reading clears
+        li      t2, 10
+        beq     t1, t2, done
+        sw      t1, 12(s0)      # and onto the display with it
+        j       wait
+done:   li      a7, 10
+        ecall
+"""
+
+
+def test_a_program_that_asks_oftener_than_a_hand_types_loses_nothing(told,
+                                                                    tmp_path):
+    """A line typed at the device is typed OUT by it, a letter every so many
+    instructions, as a hand does (the architect, 2026-10-26). A program that does
+    nothing but ask for keys is there before every letter."""
+    with RunController(told, out=io.StringIO()) as control:
+        opened(control, tmp_path, ECHOES,
+               bus=DeviceBus([make("keyboard", delay=1)]))
+        control.carry_on()
+        assert waited_for(lambda: control.state == RUNNING)
+        control.typed("keyboard", "hi there\n")
+        assert control.settled(20)
+        looks = control.session.device("keyboard").looks
+    assert told.last.state == ENDED  # the newline came last and ended it
+    assert (looks["lost"], looks["text"]) == (0, "hi there")
+
+
+def test_a_program_that_works_between_asking_loses_the_letters_between(told,
+                                                                      tmp_path):
+    """And THIS is what the device is for: the hand goes on typing whether anybody
+    is asking or not.
+
+    The program does about a hundred instructions of work after every letter it
+    reads, and the hand types one every twenty-five, so three letters pass
+    unasked-for between one reading and the next. Of `hi there` it reads the `h`,
+    then the `h` of `there` - the letter that happened to be in the register when
+    it next looked - and then the newline, which ends it; six letters are gone and
+    counted. Nothing of this is chance: the hand is counted in INSTRUCTIONS, so
+    the same program loses the same letters every time (INV-D).
+    """
+    with RunController(told, out=io.StringIO()) as control:
+        opened(control, tmp_path, SLOWLY,
+               bus=DeviceBus([make("keyboard", delay=1)]))
+        control.carry_on()
+        assert waited_for(lambda: control.state == RUNNING)
+        control.typed("keyboard", "hi there\n")
+        assert control.settled(20)
+        looks = control.session.device("keyboard").looks
+    assert told.last.state == ENDED
+    assert (looks["lost"], looks["text"]) == (6, "hh")
+
+
+def test_a_hand_that_types_slower_loses_nothing_to_the_same_program(told,
+                                                                   tmp_path):
+    """The other side of the same comparison, and the reason `typing` is an option:
+    a hand slower than the program's work loses it nothing."""
+    with RunController(told, out=io.StringIO()) as control:
+        opened(control, tmp_path, SLOWLY,
+               bus=DeviceBus([make("keyboard", delay=1, typing=200)]))
+        control.carry_on()
+        assert waited_for(lambda: control.state == RUNNING)
+        control.typed("keyboard", "hi there\n")
+        assert control.settled(20)
+        looks = control.session.device("keyboard").looks
+    assert told.last.state == ENDED
+    assert (looks["lost"], looks["text"]) == (0, "hi there")
+
+
+def test_a_file_poured_into_a_keyboard_of_one_key_loses_nothing(told, tmp_path):
+    """The other way, and what it is for: a file prepared beforehand is taken a
+    letter at a time, whenever the keyboard has room, so a program reads the whole
+    of it however seldom it asks."""
+    with RunController(told, out=io.StringIO()) as control:
+        opened(control, tmp_path, ECHOES,
+               bus=DeviceBus([make("keyboard", delay=1)]))
+        control.carry_on()
+        assert waited_for(lambda: control.state == RUNNING)
+        control.fed("keyboard", "hi there\n")
+        assert control.settled(20)
+        looks = control.session.device("keyboard").looks
+    assert told.last.state == ENDED
+    assert (looks["lost"], looks["text"]) == (0, "hi there")
+
+
+def test_an_image_asked_of_a_device_answers_under_its_own_name(control, told,
+                                                               tmp_path):
+    """It answers with the BYTES of an image and not with the state of a device,
+    so it is told apart from everything else that is done to one."""
+    from pyrars.session.control import IMAGE
+
+    opened(control, tmp_path,
+           bus=DeviceBus([make("disk", blocks=2, block_size=8)]))
+    control.put_on("disk", bytes(range(16)))
+    control.image_of("disk")
+    assert control.settled()
+    kept = [one for one in told.answers if one.what == IMAGE]
+    assert len(kept) == 1
+    assert (kept[0].value.name, kept[0].value.data) == ("disk", bytes(range(16)))
+
+
+def test_a_clock_stopped_by_hand_while_the_program_runs(told, tmp_path):
+    """The one thing a program cannot tell from the inside: the time standing
+    still."""
+    with RunController(told, out=io.StringIO(), speed=2000) as control:
+        opened(control, tmp_path, FOREVER, bus=DeviceBus([make("timer")]))
+        control.carry_on()
+        assert waited_for(lambda: control.state == RUNNING)
+        control.ticking("timer", False)
+        assert waited_for(lambda: any(
+            one.what == DEVICE and one.value.state["running"] is False
+            for one in told.answers))
+        control.stop()
+        assert control.settled()
+    assert control.session.device("timer").state["running"] is False
+
+
+def test_a_key_of_a_device_nobody_attached(control, told, tmp_path):
+    """It comes back as a question that could not be answered, like any other, and
+    the thread of the run is none the worse for it."""
+    opened(control, tmp_path)
+    control.press("lab", 0)
+    assert control.settled()
+    assert [one.what for one in told.failures] == [DEVICE]
+    assert "no device of that name" in told.failures[0].message
+    control.step()
+    assert control.settled()
+    assert told.last.instructions == 1
+
+
 # ------------------------------------------------------------- the snapshots
 
 
@@ -335,6 +755,100 @@ def test_a_snapshot_goes_out_no_oftener_than_it_was_asked_to(told, tmp_path):
         control.step(10)
         assert control.settled()
     assert len([one for one in often.snapshots if one.state == RUNNING]) == 10
+
+
+def test_the_thread_gives_the_interpreter_up_with_every_snapshot(told, tmp_path):
+    """And with every snapshot only, not with every instruction.
+
+    A thousandth of a second given up is what lets whoever owns a main loop have
+    the interpreter at all (see `YIELD`); given up per INSTRUCTION it would divide
+    the speed of the machine by thirty. So: a run that sends a snapshot a turn
+    takes at least a millisecond a turn, and a run that sends one an hour takes no
+    time at all.
+    """
+    from pyrars.session.control import YIELD
+
+    with RunController(told, out=io.StringIO(), every=0) as control:
+        opened(control, tmp_path)
+        began = time.monotonic()
+        control.carry_on()
+        assert control.settled(20)
+        often = time.monotonic() - began
+    assert told.last.instructions == WHOLE
+    assert often >= (WHOLE - 1) * YIELD
+
+    with RunController(told, out=io.StringIO(), every=3600) as control:
+        opened(control, tmp_path)
+        began = time.monotonic()
+        control.carry_on()
+        assert control.settled(20)
+        seldom = time.monotonic() - began
+    assert seldom < WHOLE * YIELD  # one snapshot, one millisecond given up
+
+
+def test_a_run_that_is_slowed_gives_way_by_being_slow(told, tmp_path):
+    """A run held back to a speed sleeps between its instructions, so it is not
+    made to give up anything besides: the pace it was asked for is the pace it
+    keeps."""
+    with RunController(told, out=io.StringIO(), every=0, speed=200) as control:
+        opened(control, tmp_path)
+        began = time.monotonic()
+        control.carry_on()
+        assert control.settled(20)
+        took = time.monotonic() - began
+    # eighteen instructions at two hundred a second is a tenth of a second; a
+    # millisecond given up on top of each would be a fifth
+    assert took < 1.5 * WHOLE / 200
+
+
+def test_nothing_more_is_said_until_the_last_was_heard(told, tmp_path):
+    """Whoever is told does work for every snapshot, and a machine at its own
+    speed can say more than any window can answer for. So one who asks to be
+    waited for is waited for."""
+    with RunController(told, out=io.StringIO(), every=0, waits=True) as control:
+        opened(control, tmp_path, FOREVER)
+        control.carry_on()
+        assert waited_for(lambda: len(told.snapshots) >= 2)
+        held = len(told.snapshots)
+        time.sleep(0.1)  # a tenth of a second of a run without an end
+        assert len(told.snapshots) == held  # and not a word more
+        control.heard()
+        assert waited_for(lambda: len(told.snapshots) == held + 1)
+        time.sleep(0.05)
+        assert len(told.snapshots) == held + 1
+        control.stop()
+        assert control.settled()
+    # the snapshot a movement ENDS on is not held back by anybody: a window must
+    # be told that the machine has stopped
+    assert told.last.state == ENDED
+
+
+def test_the_snapshot_is_the_last_word_of_a_batch(told, tmp_path):
+    """Whoever is told says it has HEARD when it has the snapshot, so by then it
+    must have had everything that came with it: the answers of what is being
+    watched go out first and the snapshot closes the batch."""
+    with RunController(told, out=io.StringIO(), every=0, waits=True) as control:
+        opened(control, tmp_path)
+        control.watching = {"counted": lambda session: session.count().instructions}
+        control.step(1)
+        assert control.settled()
+    kinds = [(type(one).__name__, getattr(one, "what", getattr(one, "state", "")))
+             for one in told.events]
+    answered = kinds.index(("Answer", "counted"))
+    snapshot = next(index for index, one in enumerate(kinds)
+                    if one == ("Snapshot", RUNNING))
+    assert answered < snapshot
+
+
+def test_whoever_does_not_ask_to_be_waited_for_is_told_as_often_as_ever(told,
+                                                                       tmp_path):
+    """A test, a script, anything that only keeps what it is told: the loop says
+    what it has to say and does not wait for an answer."""
+    with RunController(told, out=io.StringIO(), every=0) as control:
+        opened(control, tmp_path)
+        control.step(5)
+        assert control.settled()
+    assert len([one for one in told.snapshots if one.state == RUNNING]) == 5
 
 
 def test_every_movement_says_at_once_that_it_is_running(told, tmp_path):
@@ -452,6 +966,96 @@ def test_a_program_waiting_for_a_line(control, told, tmp_path):
     control.carry_on()
     assert waited_for(lambda: any(one.what == ASKING for one in told.answers))
     assert control.settled(0.2) is False  # it is waiting, and it waits
+    control.answer("Ann")
+    assert control.settled()
+    assert told.last.stopped.reason == "exited"
+
+
+def test_a_program_waiting_is_a_state_of_its_own(control, told, tmp_path):
+    """Nothing of the machine goes on while a program waits for a line, and a
+    window that said "running" would be offering to pause something that is not
+    going anywhere."""
+    opened(control, tmp_path, ASKS)
+    control.carry_on()
+    assert waited_for(lambda: control.state == WAITING)
+    assert told.last.state == WAITING
+    assert told.last.place is not None  # and it still says where the machine is
+    control.answer("Ann")
+    assert control.settled()
+    assert WAITING not in [one.state for one in told.snapshots[-1:]]
+    assert told.last.stopped.reason == "exited"
+
+
+def test_a_line_given_puts_the_run_back_on_its_way(told, tmp_path):
+    """The moment the line is taken, the run is going again - and every snapshot
+    from then on says so. One that still said "waiting" would have a window
+    offering to stop something that is already on its way."""
+    with RunController(told, out=io.StringIO(), every=0) as control:
+        opened(control, tmp_path, ASKS)
+        control.carry_on()
+        assert waited_for(lambda: control.state == WAITING)
+        waiting = len(told.snapshots)
+        control.answer("Ann")
+        assert control.settled()
+    after = [one.state for one in told.snapshots[waiting:]]
+    assert after  # the run went on, and said so more than once
+    assert WAITING not in after
+    assert RUNNING in after
+
+
+def test_a_run_stopped_while_it_waited_may_be_taken_back_and_gone_on_with(
+        control, told, tmp_path):
+    """Ending a run ends its input. A step back reaches over the end of a run, so
+    what follows must be able to ask for a line again - otherwise the program
+    would meet the end of its input the moment it asked."""
+    opened(control, tmp_path, ASKS)
+    control.carry_on()
+    assert waited_for(lambda: control.state == WAITING)
+    control.stop()
+    assert control.settled()
+    control.back(2)
+    control.carry_on()
+    assert waited_for(lambda: control.state == WAITING)
+    control.answer("Ann")
+    assert control.settled()
+    assert told.last.stopped.reason == "exited"
+
+
+def test_a_run_waiting_for_a_line_can_still_be_stopped(control, told, tmp_path):
+    """The flag that stops the loop would never be read: the thread is standing in
+    the input, not in the machine. Ending the input is what wakes it."""
+    opened(control, tmp_path, ASKS)
+    control.carry_on()
+    assert waited_for(lambda: control.state == WAITING)
+    control.stop()
+    assert control.settled()
+    assert told.last.state == ENDED
+    assert told.last.stopped.reason == "stopped"
+
+
+def test_what_a_stopped_run_says_is_that_it_was_stopped(control, told, tmp_path):
+    """The program is woken by its input ending, and what it makes of that - here,
+    a number it cannot read - never reaches the person: the loop of the machine
+    sees the flag before the next instruction and ends the run as a STOP."""
+    opened(control, tmp_path, ASKS)
+    control.carry_on()
+    assert waited_for(lambda: control.state == WAITING)
+    control.stop()
+    assert control.settled()
+    assert told.last.stopped.message == ""  # not what the program made of it
+
+
+def test_a_run_that_begins_again_may_be_spoken_to_again(control, told, tmp_path):
+    """Ending a run ends its input; the next one has an input of its own, or
+    nothing could ever be typed after a stop."""
+    opened(control, tmp_path, ASKS)
+    control.carry_on()
+    assert waited_for(lambda: control.state == WAITING)
+    control.stop()
+    assert control.settled()
+    control.restart()
+    control.carry_on()
+    assert waited_for(lambda: control.state == WAITING)
     control.answer("Ann")
     assert control.settled()
     assert told.last.stopped.reason == "exited"

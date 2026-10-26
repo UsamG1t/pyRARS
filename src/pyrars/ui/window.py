@@ -1,0 +1,1129 @@
+"""The one window: the program and the state of the machine side by side.
+
+The editor and the state are seen at the same time, with the views below them and
+the actions in the header (user decision 2026-10-14). The window holds no logic of
+its own: which actions are possible comes from `ui/actions.py`, and everything
+about the run comes from the controller, whose events arrive from the thread of the
+run and are handed to the main loop before a widget is touched (INV-T).
+"""
+
+import sys
+from pathlib import Path
+
+import gi
+
+gi.require_version("Gtk", "4.0")
+gi.require_version("Adw", "1")
+
+from gi.repository import Adw, Gio, GLib, Gtk  # noqa: E402 - after require_version
+
+from pyrars.session.control import (  # noqa: E402
+    ASKING, DEVICE, ENDED, IMAGE, LOAD, NOTHING, RUNNING, STANDING, WAITING,
+    Answer, Failed, RunController, Snapshot)
+from pyrars.session import project as projects  # noqa: E402
+from pyrars.session import settings as runs  # noqa: E402
+from pyrars.session.project import Project  # noqa: E402
+from pyrars.ui import actions, devices, drawing, shown  # noqa: E402
+from pyrars.ui.canvas import Canvas  # noqa: E402
+from pyrars.ui.editor import Editor  # noqa: E402
+from pyrars.ui.help_window import HelpWindow  # noqa: E402
+from pyrars.ui.project_window import ProjectWindow  # noqa: E402
+from pyrars.ui.settings_window import SettingsWindow  # noqa: E402
+from pyrars.ui.table import Table  # noqa: E402
+from pyrars.values import VALUE_FORMATS  # noqa: E402
+
+
+# How long a thread may hold the interpreter before it is offered to another.
+#
+# This is a setting of CPython itself and it is set HERE because a window is the
+# one place in this project where a GTK main loop and a thread of Python run side
+# by side, and the default is wrong for exactly that. The main loop asks for the
+# interpreter back after every call it makes into C, and with the default of five
+# milliseconds it waits that long for each of them: measured on a program painting
+# a bitmap display at full speed, the window got two turns in seven seconds and
+# the picture never appeared. At a tenth of a millisecond it got a hundred and
+# sixty-six turns in three seconds, the picture filled as the program painted it,
+# and the RUN itself went half again as fast - fifty-four thousand instructions a
+# second against thirty-five - because nothing was fighting over the interpreter
+# any more (the architect, 2026-10-25).
+SWITCH = 0.0001
+
+
+class Writing:
+    """A stream the program writes to that puts what it writes in the window.
+
+    The program writes from the thread of the run, so every piece is handed to the
+    main loop and the widget is touched from its own thread only. Nothing written
+    here can be taken back, which is what the world of a shared terminal says as
+    well: a step back does not unprint what has been seen.
+    """
+
+    def __init__(self, shown) -> None:
+        self.shown = shown
+
+    def write(self, text: str) -> int:
+        GLib.idle_add(self.shown, text)
+        return len(text)
+
+    def flush(self) -> None:
+        pass
+
+    def seekable(self) -> bool:
+        return False  # a window is a terminal, not a buffer that can be cut
+
+
+class Window(Adw.ApplicationWindow):
+    """The window itself."""
+
+    __gtype_name__ = "PyrarsWindow"
+
+    def __init__(self, project: Project | None = None, files: tuple[str, ...] = (),
+                 cache: str | None = None, where: str = "",
+                 settings: runs.Settings | None = None, **kept) -> None:
+        super().__init__(title="pyRARS", **kept)
+        sys.setswitchinterval(SWITCH)  # see `SWITCH`: a main loop beside a thread
+        self.project = project
+        # How the program is RUN, as against what it IS: the devices, the models,
+        # the counting. They belong to the person rather than to the program, so
+        # they are read from where a desktop keeps such things; one that cannot be
+        # understood is SAID and the defaults are used, for a window must open
+        # whatever is in that file.
+        self.settings, self.settings_wrong = settings, ""
+        if settings is None:
+            try:
+                self.settings = runs.read()
+            except ValueError as problem:
+                self.settings, self.settings_wrong = runs.Settings(), str(problem)
+        self.state = NOTHING
+        self.journal = 0
+        self.buttons: dict[str, Gtk.Button] = {}
+        self.set_default_size(1100, 740)
+
+        self.editor = Editor(cache)
+        self.editor.watchers.append(self._files_changed)
+        self.editor.marked.append(self._breakpoint_changed)
+        self.format = "hex"
+        # How many instructions a second the run is allowed, or nothing at all for
+        # as fast as it can; a slowed run is one somebody is watching, and the
+        # window keeps every view up to date while it goes.
+        self.speed = None
+        self.program = None
+        # Where the project came from, when one was opened from a file; a project
+        # made in the window has nowhere yet.
+        self.where_the_project_is = where
+        self.standing = Gtk.Label(xalign=0.0, selectable=True)
+        self.standing.add_css_class("monospace")
+        # A table with nothing in it says why: "is there nothing, or is this
+        # broken?" is two questions, and only one of them is being asked.
+        self.views_of = {
+            "registers": Table(shown.REGISTERS),
+            "floats": Table(shown.FLOATS),
+            "control": Table(shown.CONTROL),
+            "text": Table(shown.TEXT, "No program is assembled yet"),
+            "data": Table(shown.DATA, "The program lays out no data"),
+            "labels": Table(shown.LABELS, "The program names nothing"),
+            "frames": Table(shown.FRAMES,
+                            "The run is inside no call.\n"
+                            "A frame appears for every call it is inside, as far as "
+                            "the calling convention lets anyone tell."),
+            "cache": Table(shown.CACHES, _NOT_GIVEN % "a cache"),
+            "pipeline": Table(shown.PIPELINE, _NOT_GIVEN % "a pipeline"),
+            "counted": Table(shown.COUNTED, _NOT_GIVEN % "the counting"),
+        }
+        # What is DRAWN rather than written out: the grid of a cache, the diagram
+        # of the pipeline, the kinds of instruction a run was made of. A table says
+        # what happened; a picture says what is happening (the architect,
+        # 2026-10-22).
+        self.pictures = {name: Canvas() for name in ("cache", "pipeline",
+                                                     "counted")}
+        # The pages that are only there while they are asked for, and the panels
+        # of the devices, which are built when a device is first attached.
+        self.panels: dict[str, Gtk.Widget] = {}
+        self.pages_now: list[str] = []
+        # Where the area of the devices begins, which is the memory configuration's
+        # to say and comes back with the models.
+        self.mmio_base = 0
+        self.console = _telling()
+        self.messages = _telling()
+        self.set_content(self._built())
+        for path in files or (project.paths if project is not None else ()):
+            self.open(path)
+
+        # The controller writes from its own thread; `Writing` hands every piece to
+        # the main loop, and the events go the same way through `_told`.
+        # `waits`: the thread of the run says nothing more until this window has
+        # dealt with the last snapshot. Everything a snapshot costs is paid here -
+        # tables, pictures, marks in the margin - and a machine at its own speed
+        # can say more than any window can answer for.
+        self.control = RunController(self._told, out=Writing(self._printed),
+                                     errors=Writing(self._printed), waits=True)
+        self._watching_again()
+        if self.settings_wrong:
+            self._said(f"the settings of the run: {self.settings_wrong}")
+            self._said("running with the settings as they come")
+        self._possible()
+
+    # ---------------------------------------------------------------- the shape
+
+    def _built(self) -> Gtk.Widget:
+        whole = Adw.ToolbarView()
+        whole.add_top_bar(self._header())
+        whole.set_content(self._panes())
+        return whole
+
+    def _header(self) -> Gtk.Widget:
+        header = Adw.HeaderBar()
+        files = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        for name, icon in (("open", "document-open-symbolic"),
+                           ("save", "document-save-symbolic")):
+            files.append(self._button(actions.BY_NAME[name], icon))
+        header.pack_start(files)
+
+        doing = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        doing.add_css_class("linked")
+        for action in actions.ACTIONS:
+            doing.append(self._button(action))
+        header.pack_start(doing)
+        header.pack_end(self._menu())
+        header.pack_end(self._formats())
+        header.pack_end(self._speeds())
+        return header
+
+    def _speeds(self) -> Gtk.Widget:
+        """How fast the run goes.
+
+        A machine at its own speed cannot be watched - a loop of Python still
+        carries out a hundred thousand instructions a second - so the one way to
+        see a program work is to tell it to go slowly. The choice holds while the
+        run goes on: it is read again every turn of the loop.
+        """
+        self.how_fast = Gtk.DropDown.new_from_strings(
+            [shown.speed_text(speed) for speed in shown.SPEEDS])
+        self.how_fast.set_tooltip_text("How fast the run goes")
+        self.how_fast.connect("notify::selected", self._speed_chosen)
+        return self.how_fast
+
+    def _speed_chosen(self, chooser, parameter) -> None:
+        """A speed, now and for the run that is already going. It is read every
+        turn of the loop, so a run already under way slows down at once."""
+        self.speed = shown.SPEEDS[chooser.get_selected()]
+        self.control.speed = self.speed
+        self._watching_again()  # the registers are watched while a run is slow
+
+    def _formats(self) -> Gtk.Widget:
+        """How every value of the machine is written, which is one choice for all
+        of them: a person reading a register in hexadecimal is reading memory in
+        hexadecimal too."""
+        chooser = Gtk.DropDown.new_from_strings(list(VALUE_FORMATS))
+        chooser.set_tooltip_text("How values are written")
+        chooser.connect("notify::selected", self._format_chosen)
+        return chooser
+
+    def _format_chosen(self, chooser, parameter) -> None:
+        self.format = VALUE_FORMATS[chooser.get_selected()]
+        self._views_again()
+
+    def _button(self, action: actions.Action, icon: str | None = None) -> Gtk.Button:
+        button = (Gtk.Button(icon_name=icon) if icon
+                  else Gtk.Button(label=action.label))
+        button.set_tooltip_text(f"{action.about} ({action.keys})")
+        button.connect("clicked", self._asked, action.name)
+        self.buttons[action.name] = button
+        return button
+
+    def _menu(self) -> Gtk.Widget:
+        """What is done to the files, where a header bar has no room for it."""
+        menu = Gio.Menu()
+        files = Gio.Menu()
+        for name in ("new", "open", "save", "save_as", "close_tab"):
+            files.append(actions.BY_NAME[name].label, f"app.{name}")
+        files.append(actions.BY_NAME["project"].label, "app.project")
+        files.append(actions.BY_NAME["settings"].label, "app.settings")
+        helping = Gio.Menu()
+        helping.append(actions.BY_NAME["reference"].label, "app.reference")
+        changes = Gio.Menu()
+        for name in ("undo", "redo", "find", "toggle_break"):
+            changes.append(actions.BY_NAME[name].label, f"app.{name}")
+        menu.append_section(None, files)
+        menu.append_section(None, changes)
+        menu.append_section(None, helping)
+        running = Gio.Menu()
+        running.append("Clear the console", "app.clear_console")
+        menu.append_section(None, running)
+        menu.append_section(None, _one_item("Quit", "app.quit"))
+        return Gtk.MenuButton(icon_name="open-menu-symbolic", menu_model=menu,
+                              tooltip_text="Everything else")
+
+    def _panes(self) -> Gtk.Widget:
+        upper = Gtk.Paned(orientation=Gtk.Orientation.HORIZONTAL)
+        upper.set_start_child(self.editor)
+        upper.set_end_child(self._machine())
+        upper.set_position(700)
+        upper.set_resize_start_child(True)
+        whole = Gtk.Paned(orientation=Gtk.Orientation.VERTICAL)
+        whole.set_start_child(upper)
+        whole.set_end_child(self._views())
+        whole.set_position(480)
+        whole.set_resize_start_child(True)
+        return whole
+
+    def _machine(self) -> Gtk.Widget:
+        """Where the run is, and the three files of registers under it."""
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+        self.standing.set_margin_start(8)
+        self.standing.set_margin_top(6)
+        self.standing.set_margin_bottom(6)
+        box.append(self.standing)
+        pages = Gtk.Notebook()
+        for name, title in (("registers", "Registers"), ("floats", "Floats"),
+                            ("control", "Control")):
+            pages.append_page(self.views_of[name], Gtk.Label(label=title))
+        box.append(pages)
+        return box
+
+    def _views(self) -> Gtk.Widget:
+        self.views = Gtk.Notebook()
+        self.views.set_scrollable(True)  # there are more pages than there is room
+        for name, title in (("text", "Text"), ("data", "Data"),
+                            ("labels", "Labels"), ("frames", "Frames")):
+            self.views.append_page(self.views_of[name], Gtk.Label(label=title))
+        self.console_page = self.views.append_page(self._console(),
+                                                   Gtk.Label(label="Console"))
+        self.views.append_page(_scrolled(self.messages), Gtk.Label(label="Messages"))
+        self._pages_again()
+        self.views.connect("switch-page", self._looking_at)
+        return self.views
+
+    # ------------------------------------------------- the pages that come and go
+
+    def pages_wanted(self) -> list[str]:
+        """The views that are there only while the run is set up to feed them.
+
+        A page about a thing nobody asked to watch says nothing and takes the room
+        of a page that would: four of them pushed the Console behind a scroll (the
+        architect, 2026-10-22). So the cache, the pipeline, the counting and every
+        device appear when they are asked for in the run window and go when they
+        are not.
+        """
+        wanted = []
+        if self.settings.cache is not None or self.settings.instructions is not None:
+            wanted.append("cache")
+        if self.settings.pipeline is not None:
+            wanted.append("pipeline")
+        if self.settings.statistics:
+            wanted.append("counted")
+        return wanted + [f"{_DEVICE}{name}" for name in sorted(self.settings.devices)]
+
+    def _pages_again(self) -> None:
+        """Put the pages that come and go where they belong.
+
+        They are all at the END of the notebook, after the pages that are always
+        there, so that nothing a person is looking at moves about when a setting
+        changes; and the page being looked at is kept where it can be.
+        """
+        wanted = self.pages_wanted()
+        if wanted == self.pages_now:
+            return
+        looking = self.views.get_current_page()
+        for _ in self.pages_now:
+            self.views.remove_page(-1)
+        for name in wanted:
+            self.views.append_page(self._page_of(name),
+                                   Gtk.Label(label=_titled(name)))
+        self.pages_now = wanted
+        self.views.set_current_page(min(max(looking, 0),
+                                        self.views.get_n_pages() - 1))
+
+    def pages(self) -> list[str]:
+        """Every page of the lower notebook, in the order they are in."""
+        return [*FIXED, *self.pages_now]
+
+    def showing(self, which: int | None = None) -> str:
+        """The name of the page that is OPEN - or of the one at a place, for a
+        notebook says a page is being switched to BEFORE it is the current one.
+        Everything that costs anything to show is asked for by this one name."""
+        pages = self.pages()
+        if which is None:
+            which = self.views.get_current_page()
+        return pages[which] if 0 <= which < len(pages) else ""
+
+    def wanted_now(self, which: int | None = None) -> frozenset[str]:
+        """What has to be asked of the session to show what is on the screen.
+
+        The registers are not in it: they are in the pane beside the editor and are
+        always on the screen, so they are always asked for. Everything else is one
+        page of the lower notebook, and the console, the messages and the text
+        segment need nothing of the session at all - the window has them already.
+        """
+        page = self.showing(which)
+        return frozenset({page} if page not in NEEDS_NOTHING else ())
+
+    def _watching_again(self, which: int | None = None) -> None:
+        """What the thread of the run answers with every snapshot it sends.
+
+        This is how a page stays alive while the machine RUNS. The window cannot
+        ask for anything then - a question waits in the queue behind the movement,
+        and a movement nobody stops never ends - so the questions travel with the
+        snapshots instead, and they are the questions of the OPEN PAGE and of
+        nothing else. That is what makes it affordable: one page, thirty times a
+        second (the architect, 2026-10-25, of a bitmap display that could only be
+        seen by stopping the program).
+
+        The REGISTERS are watched only while a speed is set. They are always on the
+        screen, but a run at the speed of the machine changes them tens of
+        thousands of times a second and what a window would show of that is a blur;
+        putting the three files of them up thirty times a second costs more than
+        the whole of the rest and was measured doing it (it buried the main loop
+        under more work than it could take, 2026-10-25). They are put up the moment
+        the machine stands still - and while a run is SLOW they are the thing
+        somebody is watching, so then they travel too.
+        """
+        wanted = self.wanted_now(which)
+        watching = {} if self.speed is None else {REGISTERS: _of_the_registers}
+        if wanted:
+            watching[SHOWN] = lambda session: _of_what_is_shown(session, wanted)
+        self.control.watching = watching
+
+    def _looking_at(self, notebook, page, which: int) -> None:
+        """Another page was opened: it is watched from now on, and asked for once
+        so that it does not wait for the next snapshot.
+
+        The notebook says WHICH page before that page is the current one, so the
+        number it gives is the one to go by and not what the notebook would answer.
+        """
+        self._watching_again(which)
+        self._asked_for_what_is_shown(which)
+
+    def _asked_for_what_is_shown(self, which: int | None = None) -> None:
+        """Ask the session for the page that is open.
+
+        Nothing is asked while the machine is going: the question would wait in the
+        queue behind the movement. What is shown then comes with the snapshots
+        (`_watching_again`).
+        """
+        if not self.session_is_open or self.state == RUNNING:
+            return
+        wanted = self.wanted_now(which)
+        if wanted:
+            self.control.ask(SHOWN, lambda session: _of_what_is_shown(session,
+                                                                      wanted))
+
+    def _page_of(self, name: str) -> Gtk.Widget:
+        """The page of one of them, built the first time it is wanted and kept: a
+        panel that is taken off the notebook and put back must come back holding
+        what it held."""
+        if name not in self.panels:
+            if name.startswith(_DEVICE):
+                self.panels[name] = devices.Panel(name[len(_DEVICE):],
+                                                  doors=self._doors)
+            else:
+                self.panels[name] = _side_by_side(
+                    _scrolled(self.pictures[name]), self.views_of[name])
+        return self.panels[name]
+
+    def _console(self) -> Gtk.Widget:
+        """What the program writes, and the line it is waiting for.
+
+        One page, as a terminal is one thing: what is typed is echoed where the
+        program's own writing goes, so that what is read afterwards is the whole
+        conversation and not half of it.
+        """
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+        box.append(_scrolled(self.console))
+        self.typing = Gtk.Entry(placeholder_text=_TYPE_HERE, margin_top=4,
+                                margin_bottom=4, margin_start=4, margin_end=4)
+        self.typing.connect("activate", lambda *gone: self._typed())
+        box.append(self.typing)
+        return box
+
+    # ------------------------------------------------------------- what is done
+
+    def _asked(self, button, name: str) -> None:
+        """A button was pressed, or its key. Nothing here waits for anything: the
+        controller takes the word and the answer arrives through `_told`."""
+        self.do(name)
+
+    def do(self, name: str) -> None:
+        """One action by its name, if it is possible at all."""
+        if name not in self.allowed():
+            return
+        if name in _OF_A_FILE:
+            _OF_A_FILE[name](self)
+            return
+        if name == "assemble":
+            self.clear_console()
+            self._assembled()
+            return
+        if name == "until":
+            self._on_to_the_cursor()
+            return
+        if name == "restart":
+            self.clear_console()
+        getattr(self.control, {"continue": "carry_on"}.get(name, name))()
+
+    def allowed(self) -> frozenset[str]:
+        """Everything that can be done at this moment, of the run and of the files
+        alike."""
+        page = self.editor.page
+        buffer = page.buffer if page is not None else None
+        return actions.possible(
+            self.state, self.journal,
+            pipeline=self.settings.pipeline is not None) | actions.possible_of_a_file(
+            len(self.editor.pages), self.editor.modified,
+            named=bool(page.path) if page is not None else True,
+            undo=bool(buffer and buffer.get_can_undo()),
+            redo=bool(buffer and buffer.get_can_redo()))
+
+    def _possible(self) -> None:
+        """Only what can be done now can be pressed."""
+        allowed = self.allowed()
+        for name, button in self.buttons.items():
+            button.set_sensitive(name in allowed)
+        # A cycle of the pipeline is not THERE at all unless a pipeline is being
+        # modelled: a button that can never be pressed is a button in the way, and
+        # this one arrives with the page it belongs to (the architect, 2026-10-23).
+        self.buttons["cycle"].set_visible(self.settings.pipeline is not None)
+
+    # ---------------------------------------------------------------- the files
+
+    def _assembled(self) -> None:
+        """Assemble THE PROGRAM, which is one file unless a project says otherwise.
+
+        Several files open in an editor are several things somebody is working on,
+        not one program in several pieces: assembling them together glued two
+        programs end to end, which is nobody's idea of a default (the architect,
+        2026-10-21). A program of several files is a PROJECT, and saying so is what
+        the project window is for.
+
+        The assembler reads files from the disk, so everything that has been
+        changed is written there first.
+        """
+        self.editor.save_every_change()
+        try:
+            # The devices and the models the run is to be watched by, built afresh
+            # for every run: a model counts, and what the last run counted is not
+            # what this one is counting.
+            world = runs.world(self.settings)
+        except ValueError as problem:
+            self._said(f"the run cannot be set up: {problem}")
+            return
+        if self.project is not None:
+            missing = [path for path in self.project.paths
+                       if not Path(path).exists()]
+            if missing:
+                self._said(f"{shown.name_of(missing[0])}: the project names a file "
+                           "that is not there")
+                return
+            self._said("assembling the project "
+                       f"{shown.name_of(self.where_the_project_is)}"
+                       if self.where_the_project_is else "assembling the project")
+            self.control.load(self.project, **world)
+            return
+        page = self.editor.page
+        if page is None or not page.path:
+            self._said("nothing to assemble: this file is not saved anywhere yet")
+            return
+        self._said(f"assembling {shown.name_of(page.path)}")
+        self.control.load(projects.of([page.path],
+                                      folder=str(Path(page.path).parent)), **world)
+
+    def _on_to_the_cursor(self) -> None:
+        """Carry on to the line being looked at, and no further.
+
+        This is the one movement that comes from the editor and not from the
+        machine, so the line is turned into a place the session can find - the
+        file and the line - and the finding is done in the thread of the run. A
+        line with no instruction on it cannot be run to, and the session says so
+        in the same words it says it of a breakpoint, because it is the same
+        question asked twice.
+        """
+        where = self.editor.where_the_cursor_is()
+        if where is None:
+            self._said("nothing to run to: this file is not saved anywhere yet")
+            return
+        self.control.until(f"{where[0]}:{where[1]}")
+
+    def open_the_reference(self) -> HelpWindow:
+        """Everything that can be written in a program, for looking something up
+        when there is nothing to point at."""
+        reading = HelpWindow(self.project.xlen if self.project else 32,
+                             transient_for=self)
+        reading.present()
+        return reading
+
+    def ask_what_the_program_is(self) -> ProjectWindow:
+        """The window that says what the program is made of."""
+        asking = ProjectWindow(self.project, files=self.editor.paths,
+                               where=self.where_the_project_is,
+                               settled=self.the_program_is, transient_for=self)
+        asking.present()
+        return asking
+
+    def ask_how_it_is_run(self) -> SettingsWindow:
+        """The window that says how the program is run."""
+        asking = SettingsWindow(self.settings, settled=self.the_run_is,
+                                transient_for=self)
+        asking.present()
+        return asking
+
+    def the_run_is(self, settings: runs.Settings) -> None:
+        """What the window of the run answered with. It is kept at once - these
+        belong to the person, and a person who set them up does not expect to set
+        them up again tomorrow - and given to the machine at the next Assemble."""
+        self.settings = settings
+        kept = ""
+        try:
+            kept = f", kept in {shown.name_of(runs.save(settings))}"
+        except OSError as problem:
+            self._said(f"the settings of the run could not be kept: "
+                       f"{problem.strerror or problem}")
+        self._pages_again()
+        self._watching_again()  # and what is watched comes and goes with them
+        self._possible()  # the cycle of the pipeline comes and goes with it
+        self._said(f"the run: {shown.run_called(settings)}{kept}")
+        if self.session_is_open:
+            self._said("assemble again to run it that way")
+
+    def the_program_is(self, project: Project | None, where: str) -> None:
+        """What the project window answered with: a project, or nothing at all -
+        and nothing at all means the file being looked at is the program."""
+        self.project = project
+        self.where_the_project_is = where if project is not None else ""
+        self._files_changed()
+        if project is None:
+            self._said("the program is the file being looked at")
+            return
+        self._said("the program is " + ", ".join(
+            shown.name_of(path) for path in project.paths)
+            + (f" (kept in {shown.name_of(where)})" if where else ""))
+
+    def open(self, path: str) -> None:
+        """A file into the editor. A file that cannot be read is SAID, not thrown:
+        a window that is given a name nobody has must still open."""
+        try:
+            self.editor.open(path)
+        except OSError as problem:
+            self._said(f"{path}: {problem.strerror or problem}")
+
+    def _opening(self) -> None:
+        dialog = Gtk.FileDialog(title="Open a file of the program")
+        dialog.open(self, None, self._opened)
+
+    def _opened(self, dialog, answer) -> None:
+        try:
+            file = dialog.open_finish(answer)
+        except GLib.Error:  # the person changed their mind
+            return
+        if file is not None:
+            self.open(file.get_path())
+
+    def _saving(self) -> None:
+        page = self.editor.page
+        if page is None:
+            return
+        if page.path:
+            self.editor.save()
+            return
+        self._saving_as()
+
+    def _saving_as(self) -> None:
+        dialog = Gtk.FileDialog(title="Write this file")
+        dialog.save(self, None, self._saved)
+
+    def _saved(self, dialog, answer) -> None:
+        try:
+            file = dialog.save_finish(answer)
+        except GLib.Error:
+            return
+        if file is not None:
+            self.editor.save(file.get_path())
+
+    def _files_changed(self) -> None:
+        """The editor's tabs or their state changed."""
+        page = self.editor.page
+        self.set_title(shown.window_title(
+            page.path if page else None, page.modified if page else False,
+            "" if self.project is None else shown.project_called(
+                self.where_the_project_is, len(self.project.files))))
+        self._possible()
+
+    # ------------------------------------------------------- what comes back
+
+    def _told(self, event) -> None:
+        """An event, FROM THE THREAD OF THE RUN: it is handed to the main loop and
+        nothing of the window is touched here."""
+        GLib.idle_add(self._heard, event)
+
+    def _heard(self, event) -> bool:
+        """The same event, now in the thread of the window."""
+        if isinstance(event, Snapshot):
+            self.state, self.journal = event.state, event.back
+            self._shown(event)
+            self._possible()
+            self.typing.set_placeholder_text(
+                _WAITING if event.state == WAITING else _TYPE_HERE)
+            # And now the thread of the run may tell us something again. Everything
+            # of a snapshot is done by here, the answers that came with it
+            # included, for the snapshot is the last of its batch.
+            self.control.heard()
+        elif isinstance(event, Answer):
+            if event.what == ASKING:
+                self._waiting_for_a_line()
+            elif event.what == LOAD:
+                self._assembled_into(event.value)
+                return GLib.SOURCE_REMOVE
+            elif event.what == BREAKS:
+                self._breaks_that_missed(event.value)
+                return GLib.SOURCE_REMOVE
+            elif event.what == REGISTERS:
+                self._registers_shown(event.value)
+                return GLib.SOURCE_REMOVE
+            elif event.what == SHOWN:
+                self._shown_now(event.value)
+                return GLib.SOURCE_REMOVE
+            elif event.what == DEVICE:
+                self._device_shown(event.value)
+                return GLib.SOURCE_REMOVE
+            elif event.what == IMAGE:
+                self._image_came(event.value)
+                return GLib.SOURCE_REMOVE
+            self._said(f"{event.what}: {_short(event.value)}")
+        elif isinstance(event, Failed):
+            self._said(f"{event.what} failed: {event.message}")
+        return GLib.SOURCE_REMOVE
+
+    # ---------------------------------------------- what the editor is told
+
+    def _assembled_into(self, program) -> None:
+        """What the assembler said, into the margins of the files it said it
+        about; what it said about no place at all, into the messages."""
+        by_file, loose = shown.problems(program.diagnostics)
+        self.program = None if program.failed else program
+        if program.failed:
+            self.here = None  # there is no machine to stand anywhere
+        # And where it DOES stand is not touched here: the snapshot of the session
+        # being built came before this answer did, and it is the one that knows.
+        self._text_again()
+        self.editor.problems(by_file)
+        self.editor.labels = tuple(program.symbols)
+        for message in loose:
+            self._said(message)
+        counted = sum(len(these) for these in by_file.values()) + len(loose)
+        if program.failed:
+            self._said(f"the program has not been assembled: {counted} to mend")
+            return
+        self._said(f"assembled: {len(program.text)} instructions"
+                   + (f", {counted} to say about it" if counted else ""))
+        self._breaks_to_the_machine()
+
+    def _breakpoint_changed(self, page, line: int, on: bool) -> None:
+        """A breakpoint was put on or taken off in the margin."""
+        if self.state != NOTHING:
+            self._breaks_to_the_machine()
+
+    def _breaks_to_the_machine(self) -> None:
+        """Every breakpoint the person has put in, as the machine's own.
+
+        They are all given again each time rather than one being added or taken
+        off: what the margins hold is what the run must stop at, and saying the
+        whole of it cannot drift from it.
+        """
+        wanted = self.editor.breakpoints()
+        self.control.ask(BREAKS, lambda session: _asked_to_stop(session, wanted))
+
+    def _breaks_that_missed(self, missed) -> None:
+        """A line with no instruction on it cannot be stopped before, so the mark
+        comes off again and the person is told why.
+
+        Whatever came of them, the text segment is written again: it shows what the
+        run stops before, and that is what has just changed.
+        """
+        self._text_again()
+        for path, line in missed:
+            for page in self.editor.pages:
+                if page.path == path and line in page.marked("breakpoint"):
+                    page.toggle(line)
+            self._said(f"{shown.name_of(path)}:{line}: no instruction of the "
+                       "program is "
+                       "there, so nothing can stop before it")
+        if missed:
+            self._text_again()
+
+    def _shown(self, shot: Snapshot) -> None:
+        """Where the machine stands, and everything that follows from it.
+
+        While the machine RUNS, only what is CHEAP is done: the line that says
+        where the run is, and the mark in the margin. Both are a handful of calls
+        into GTK, and the price of a call into GTK while a thread of Python runs
+        flat out is the whole of this rule - the main loop gets the interpreter
+        back only when the running thread's turn runs out, so a call that costs
+        nothing otherwise costs milliseconds here. Measured 2026-10-25: putting the
+        text segment up again, which is a call for every row of it, took TWO
+        SECONDS while a program ran, against a few milliseconds when it stood
+        still. So tables wait for the machine to stand still - or for a run to be
+        slowed down, where the calls are cheap again (`tables_keep_up`) - and a
+        picture, which is one call and a redraw, keeps up either way.
+
+        The editor is not SCROLLED to the line while the run goes on - a window
+        that jumped about thirty times a second could not be read - and nothing is
+        asked of the session, because a question would wait in the queue behind the
+        movement and a movement nobody stops never ends.
+        """
+        self.standing.set_text(shown.standing(shot))
+        running = shot.state == RUNNING
+        place = shot.place
+        self.editor.here(place.file if place else None, place.line if place else 0,
+                         follow=not running)
+        self.here = place.address if place is not None else None
+        if self.session_is_open and not running:
+            self.control.ask(REGISTERS, _of_the_registers)
+            if shot.state in (STANDING, ENDED):
+                # A run that waits for a line is in no state to answer questions:
+                # the thread is standing in the input.
+                self._asked_for_what_is_shown()
+        if self.tables_keep_up:
+            self._text_again()
+
+    def _registers_shown(self, values: dict) -> None:
+        self.views_of["registers"].show(
+            shown.registers(values["registers"], self.format))
+        self.views_of["floats"].show(shown.floats(values["floats"], self.format))
+        self.views_of["control"].show(shown.control(values["control"], self.format))
+
+    def _doors(self) -> dict:
+        """The ways of doing something TO a device, for the panels to use.
+
+        They are the controller's own methods: everything a person does to a device
+        is the world outside reaching into the machine, so it goes to the thread of
+        the run like everything else and does not wait for a movement to end - a
+        program that is running and asking for a key is exactly when it matters.
+        What comes back is the device as it now is.
+
+        `said` is the one that goes nowhere near a device: it is how a panel says
+        something in the messages of this window - that a file could not be read,
+        that an image was written.
+        """
+        return {"press": self.control.press, "typed": self.control.typed,
+                "fed": self.control.fed, "put_on": self.control.put_on,
+                "image_of": self.control.image_of, "ticking": self.control.ticking,
+                "said": self._said}
+
+    def _device_shown(self, seen) -> None:
+        """One device, after something was done to it."""
+        panel = self.panels.get(f"{_DEVICE}{seen.name}")
+        if panel is not None:
+            panel.show(seen, self.mmio_base)
+
+    def _image_came(self, kept) -> None:
+        """What a device was holding, asked for so that it could be written: the
+        panel that asked knows where it belongs."""
+        panel = self.panels.get(f"{_DEVICE}{kept.name}")
+        if panel is not None:
+            panel.wrote(kept.data)
+
+    def _shown_now(self, values: dict) -> None:
+        """The views of the page that is open, from what the session answered.
+
+        Only what was ASKED for is in the answer, so every view here asks whether
+        it was. A page may also be up for something the MACHINE has not got - the
+        settings reach it at an Assemble, so a cache switched on while a program is
+        already open is a page with nothing in it until the program is assembled
+        again - and that is what it then says, rather than looking broken.
+
+        WHILE A RUN GOES AT THE SPEED OF THE MACHINE, only the pictures are put up
+        (`tables_keep_up`): the grid of a cache fills, the diagram draws itself and
+        a bitmap display paints - which is what somebody watching one is watching -
+        and the numbers beside them wait for the machine to stand still or for the
+        run to be slowed down (the architect, 2026-10-25).
+        """
+        tables = self.tables_keep_up
+        if tables and "data" in values:
+            self.views_of["data"].show(shown.data(values["data"], self.format))
+        if tables and "labels" in values:
+            self.views_of["labels"].show(shown.labels(values["labels"]))
+        if tables and "frames" in values:
+            self.views_of["frames"].show(shown.frames(values["frames"]))
+        if "caches" in values:
+            self.pictures["cache"].show(
+                drawing.cache_picture(values["caches"], values["blocks"]))
+            if tables:
+                self.views_of["cache"].show(shown.caches(values["caches"]))
+                self._said_of("cache", values["caches"])
+        if "pipeline" in values:
+            self.pictures["pipeline"].show(drawing.pipeline_picture(
+                values["diagram"],
+                values["pipeline"].cycle if values["pipeline"] else -1))
+            if tables:
+                self.views_of["pipeline"].show(shown.pipeline(values["pipeline"],
+                                                              values["guesser"]))
+                self._said_of("pipeline", values["pipeline"])
+        if "counted" in values:
+            self.pictures["counted"].show(drawing.bars_picture(values["counted"]))
+            if tables:
+                self.views_of["counted"].show(shown.counted(values["counted"]))
+                self._said_of("counted", values["counted"])
+        if "devices" in values:
+            self.mmio_base = values["base"]
+            attached = {seen.name: seen for seen in values["devices"]}
+            for name in self.pages_now:
+                if name.startswith(_DEVICE):
+                    self.panels[name].show(attached.get(name[len(_DEVICE):]),
+                                           self.mmio_base, tables=tables)
+
+    def _said_of(self, name: str, wanted) -> None:
+        """What a view of a model says while it has nothing to show."""
+        self.views_of[name].says("" if wanted else _NOT_GIVEN % _THINGS[name])
+
+    def _text_again(self) -> None:
+        """The text segment: the program itself, with the place the machine stands
+        on and the places it stops before marked.
+
+        The marked lines of each file are gathered ONCE. Asking a page which of its
+        lines are marked walks the whole of its buffer, and this was asking it for
+        every instruction of the program - which cost nothing while it was done
+        once at a stop, and buried the window the day it began to be done thirty
+        times a second (2026-10-25).
+        """
+        if self.program is None:
+            return
+        marked = {page.path: set(page.marked("breakpoint"))
+                  for page in self.editor.pages if page.path}
+        breaks = {entry.address for entry in self.program.text
+                  if entry.loc is not None
+                  and entry.loc.line in marked.get(entry.loc.file, ())}
+        self.views_of["text"].show(
+            shown.text(self.program.text, self.here, breaks, self.format))
+
+    def _views_again(self) -> None:
+        """Everything again, in the format now chosen."""
+        self._text_again()
+        if self.session_is_open:
+            self.control.ask(REGISTERS, _of_the_registers)
+            self._asked_for_what_is_shown()
+
+    @property
+    def tables_keep_up(self) -> bool:
+        """Whether a TABLE may be put up again now.
+
+        A table is a call into GTK for every row of it, and such a call costs a
+        hundred times its price while a thread of Python runs flat out: the main
+        loop gets the interpreter back only when the running thread's turn runs
+        out. Measured 2026-10-25: the text segment took TWO SECONDS to put up
+        while a program ran, against a few milliseconds when it stood still.
+
+        So tables keep up while the machine stands still, and while a run is held
+        back to a SPEED - a slowed run sleeps between its instructions, so the
+        calls are cheap again and watching the numbers change is the whole point of
+        slowing it. They wait while a run goes at the speed of the machine, where
+        nothing of them could be read anyway. A PICTURE is one call and a redraw,
+        so a picture keeps up either way.
+        """
+        return self.state != RUNNING or self.speed is not None
+
+    @property
+    def session_is_open(self) -> bool:
+        return self.state != NOTHING
+
+    def clear_console(self) -> None:
+        """A run that begins has a console of its own: what the last one said is
+        not what this one is saying, and two of them in one place read as one."""
+        self.console.get_buffer().set_text("")
+
+    def _typed(self) -> None:
+        """A line for the program. It may be typed before the program asks for it,
+        as it may at a terminal, and it waits here until the program reads it."""
+        line = self.typing.get_text()
+        self.typing.set_text("")
+        self._added(self.console, line + "\n")
+        self.control.answer(line)
+
+    def _waiting_for_a_line(self) -> None:
+        """The program has asked for something: the console is where the answer
+        goes, so that is what the window shows, with the cursor already in it."""
+        self.views.set_current_page(self.console_page)
+        self.typing.grab_focus()
+
+    def _said(self, line: str) -> None:
+        self._added(self.messages, line + "\n")
+
+    def _printed(self, text: str) -> bool:
+        self._added(self.console, text)
+        return GLib.SOURCE_REMOVE
+
+    def _added(self, view: Gtk.TextView, text: str) -> None:
+        buffer = view.get_buffer()
+        buffer.insert(buffer.get_end_iter(), text)
+        view.scroll_to_iter(buffer.get_end_iter(), 0.0, False, 0.0, 0.0)
+
+    def close_up(self) -> None:
+        """Let the thread of the run end; a window that is closing waits for
+        nothing."""
+        self.control.close()
+
+
+# What the window asks the session for under its own name.
+BREAKS = "breaks"
+REGISTERS = "the registers"
+SHOWN = "what is shown"  # the views of the ONE page of the lower notebook that is open
+
+# The pages of the lower notebook that are always there, in the order they are in.
+FIXED = ("text", "data", "labels", "frames", "console", "messages")
+
+# The pages that need nothing of the session: the window has the text segment
+# already (it is the program, which it was given), and the console and the
+# messages are what was said into them.
+NEEDS_NOTHING = ("", "text", "console", "messages")
+
+# What a view of a model says while the MACHINE has not got that model. The pages
+# come and go with the settings, so a page that is there at all was asked for; what
+# it can still be waiting for is an Assemble, because that is when the machine is
+# given the models (the lesson of the empty frames, 2026-10-21, and of a cache
+# that showed nothing, 2026-10-22).
+_NOT_GIVEN = ("The program has not been assembled since %s was asked for.\n"
+              "Assemble it again, and this is filled as the run goes on.")
+_THINGS = {"cache": "a cache", "pipeline": "a pipeline", "counted": "the counting"}
+
+# A page of one device, by the device's own name.
+_DEVICE = "device:"
+
+
+def _titled(name: str) -> str:
+    """What the tab of a page that comes and goes says."""
+    if name.startswith(_DEVICE):
+        return shown.device_title(name[len(_DEVICE):])
+    return name.capitalize()
+
+
+def _of_the_registers(session) -> dict:
+    """The three files of registers, in one asking: a question of its own for each
+    would be three turns of the queue for one snapshot."""
+    return {"registers": session.registers(), "floats": session.floats(),
+            "control": session.csr()}
+
+
+def _of_what_is_shown(session, wanted) -> dict:
+    """Everything the OPEN PAGE needs, and nothing besides.
+
+    A page nobody is looking at costs nothing. The picture of a bitmap display is
+    half a megabyte, the diagram of a pipeline two hundred rows, the data segment
+    whatever the program laid out - and none of it is worth taking a copy of while
+    something else is on the screen (the architect, 2026-10-25). This is asked
+    thirty times a second while a program runs, so what it leaves out is the whole
+    of the saving.
+    """
+    answer: dict = {}
+    if "data" in wanted:
+        answer["data"] = session.data()
+    if "labels" in wanted:
+        answer["labels"] = session.symbols()
+    if "frames" in wanted:
+        answer["frames"] = session.frames()
+    if "cache" in wanted:
+        answer["caches"] = session.caches()
+        answer["blocks"] = session.cache_lines()
+    if "pipeline" in wanted:
+        answer["pipeline"] = session.pipeline()
+        answer["guesser"] = session.guesser()
+        answer["diagram"] = session.diagram()
+    if "counted" in wanted:
+        answer["counted"] = session.statistics()
+    devices = [one[len(_DEVICE):] for one in wanted if one.startswith(_DEVICE)]
+    if devices:
+        answer["base"] = session.options.config.mmio_base
+        answer["devices"] = [one for one in session.devices()
+                             if one.name in devices]
+    return answer
+
+# What the line under the console says when nothing is in it.
+_TYPE_HERE = "A line for the program"
+_WAITING = "The program is waiting for a line - type it here"
+
+
+# What each action of the files does to the window.
+_OF_A_FILE = {
+    "new": lambda window: window.editor.add(),
+    "open": lambda window: window._opening(),
+    "save": lambda window: window._saving(),
+    "save_as": lambda window: window._saving_as(),
+    "close_tab": lambda window: window.editor.close(),
+    "find": lambda window: window.editor.find(),
+    "toggle_break": lambda window: window.editor.toggle_breakpoint_here(),
+    "project": lambda window: window.ask_what_the_program_is(),
+    "settings": lambda window: window.ask_how_it_is_run(),
+    "reference": lambda window: window.open_the_reference(),
+    "undo": lambda window: window.editor.undo(),
+    "redo": lambda window: window.editor.redo(),
+}
+
+
+def _asked_to_stop(session, wanted) -> list[tuple[str, int]]:
+    """Give the session every breakpoint the margins hold, IN THE THREAD OF THE
+    RUN; answers with those it could not take."""
+    session.remove_break()
+    missed = []
+    for path, line in wanted:
+        try:
+            session.add_break(session.address_of(f"{path}:{line}"))
+        except ValueError:
+            missed.append((path, line))
+    return missed
+
+
+def _one_item(label: str, action: str) -> Gio.Menu:
+    menu = Gio.Menu()
+    menu.append(label, action)
+    return menu
+
+
+def _telling() -> Gtk.TextView:
+    """A view that shows text nobody types into."""
+    view = Gtk.TextView(editable=False, cursor_visible=False, monospace=True)
+    view.set_left_margin(8)
+    view.set_top_margin(4)
+    return view
+
+
+def _scrolled(child: Gtk.Widget) -> Gtk.Widget:
+    window = Gtk.ScrolledWindow(hexpand=True, vexpand=True)
+    window.set_child(child)
+    return window
+
+
+def _side_by_side(left: Gtk.Widget, right: Gtk.Widget) -> Gtk.Widget:
+    """Two views of one thing, beside each other: what the thing IS on the left and
+    what it has DONE on the right.
+
+    Beside and not above (the architect, 2026-10-22): the views are the lower third
+    of the window, so the room there is wide and shallow, while a picture and a
+    table of names and values are both NARROW AND LONG. Side by side each gets its
+    whole height; one above the other each got a third of a third of the window,
+    and the one below was a table nobody knew was there.
+    """
+    pane = Gtk.Paned(orientation=Gtk.Orientation.HORIZONTAL)
+    pane.set_start_child(left)
+    pane.set_end_child(right)
+    pane.set_position(520)
+    pane.set_resize_start_child(True)
+    pane.set_resize_end_child(True)
+    return pane
+
+
+def _in_a_frame(child: Gtk.Widget, title: str) -> Gtk.Widget:
+    """A piece of the window with its name above it."""
+    box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+    label = Gtk.Label(label=title, xalign=0.0)
+    label.add_css_class("heading")
+    label.set_margin_start(8)
+    label.set_margin_top(6)
+    label.set_margin_bottom(4)
+    box.append(label)
+    box.append(_scrolled(child))
+    return box
+
+
+def _short(value: object) -> str:
+    """What an answer was, in one line of a window's messages."""
+    text = str(value)
+    if len(text) > 120:
+        text = text[:117] + "..."
+    return text.replace("\n", " ")

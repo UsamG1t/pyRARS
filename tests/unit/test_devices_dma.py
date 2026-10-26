@@ -66,6 +66,23 @@ def order(machine: Machine, source: int, target: int, count: int,
 # -------------------------------------------------------------------- the copy
 
 
+def test_what_the_controller_looks_like_is_how_far_it_has_got():
+    machine, device = dma(speed=1)
+    assert device.looks()["copying"] is False
+    fill(machine, 0x10010000, 4)
+    put(machine, FROM, 0x10010000)
+    put(machine, TO, 0x10010100)
+    put(machine, WORDS, 4)
+    put(machine, CONTROL, BUSY)
+    device.on_retire(1)
+    looks = device.looks()
+    assert looks["copying"] is True
+    assert looks["copied"] + looks["left"] == 4
+    # where it has GOT to: one word is copied by the instruction that started it,
+    # because the hardware begins at once
+    assert (looks["from"], looks["to"]) == (0x10010004, 0x10010104)
+
+
 def test_a_few_words_are_copied_while_the_program_runs_on():
     machine, device = dma()
     fill(machine, DATA, 3)

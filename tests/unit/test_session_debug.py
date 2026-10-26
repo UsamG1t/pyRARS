@@ -82,14 +82,15 @@ up:     lw ra, 0(sp)
 CALLS_ITSELF, UP, GOES_BACK = TEXT + 0x28, TEXT + 0x2C, TEXT + 0x14
 
 
-def session(source: str, tmp_path, **kept) -> Session:
+def session(source: str, tmp_path, io_=None, **kept) -> Session:
     """A session over an assembled program, writing into a string."""
     path = tmp_path / "p.s"
     path.write_text(source)
     program = assemble([str(path)], AsmOptions())
     assert program.diagnostics == (), program.diagnostics
-    return Session(program, io=ConsoleIO(out=io.StringIO(), errors=io.StringIO(),
-                                        reader=io.StringIO()), **kept)
+    world = io_ if io_ is not None else ConsoleIO(
+        out=io.StringIO(), errors=io.StringIO(), reader=io.StringIO())
+    return Session(program, io=world, **kept)
 
 
 @pytest.fixture
@@ -225,6 +226,21 @@ def test_finish_the_call_the_run_is_inside(sum_session):
 
 def test_finish_outside_any_call(sum_session):
     assert sum_session.finish().reason == NOTHING
+
+
+def test_a_run_that_was_stopped_is_told_from_one_that_was_paused(sum_session):
+    """Two different things happened, and a front end has to be able to say which:
+    a paused run goes on from where it stands, a stopped one does not."""
+    from pyrars.core.simulator import Stop, StopReason
+    from pyrars.session.debug import PAUSED, REASONS, STOPPED
+
+    assert REASONS[StopReason.PAUSE] == PAUSED
+    assert REASONS[StopReason.STOP] == STOPPED
+    # Neither can be asked for from here: the loop clears both flags as it begins,
+    # so only another thread can pause or stop a run that is already going. What
+    # the two REASONS come to is held in the tests of the controller.
+    assert sum_session._ended(Stop(StopReason.STOP, 0), 3).reason == STOPPED
+    assert sum_session._ended(Stop(StopReason.PAUSE, 0), 3).reason == PAUSED
 
 
 def test_a_movement_knows_a_run_that_ended(sum_session):
@@ -582,6 +598,172 @@ def test_the_devices_show_themselves(tmp_path):
     assert s.device("timer").name == "timer"
 
 
+def test_a_key_of_a_device_pressed_from_outside(tmp_path):
+    """The world outside reaching IN, which is the other way from everything else
+    a session answers: a program that asks for a number by the sixteen buttons of
+    the lab needs somebody to press them."""
+    s = session(SUM, tmp_path, bus=DeviceBus([make("lab")]))
+    seen = s.press("lab", 6)
+    assert seen.name == "lab" and seen.looks["key"] == 6
+    assert seen.state["key down"] == 6
+    # a key of that lab that is already down goes up again, because its keys are
+    # buttons that stay down - the device's own doing, not the session's
+    assert s.press("lab", 6).looks["key"] == -1
+
+
+def test_a_text_typed_at_a_device_is_taken_a_letter_at_a_time(tmp_path):
+    """A LINE typed into a window, and not a key pushed at the device: a keyboard
+    that holds one key would lose all of a line but its last letter if they were
+    pushed at it together. Fed, it takes a letter whenever the program has read
+    the one before."""
+    from pyrars.devices.keyboard import RECEIVER_DATA
+    from pyrars.isa.memory import DEFAULT
+
+    s = session(SUM, tmp_path, bus=DeviceBus([make("keyboard")]))
+    seen = s.fed("keyboard", "hi")
+    assert seen.name == "keyboard"
+    where = DEFAULT.mmio_base + RECEIVER_DATA
+    s.step(1)  # the keyboard takes a key when it has room, on any instruction
+    assert s.device("keyboard").state["key waiting"] is True
+    assert s.machine.memory.read(where, 4) == ord("h")  # as a program reads it
+    s.step(1)
+    assert s.machine.memory.read(where, 4) == ord("i")
+
+
+def test_a_line_typed_at_a_device_is_typed_out_as_a_hand_would(tmp_path):
+    """A letter every so many instructions, and not all at once: so a line typed
+    while the machine stands still waits, and arrives as the program runs (the
+    architect, 2026-10-26)."""
+    from pyrars.devices.keyboard import RECEIVER_DATA
+    from pyrars.isa.memory import DEFAULT
+
+    s = session(SUM, tmp_path, bus=DeviceBus([make("keyboard", typing=4)]))
+    seen = s.typed("keyboard", "abc")
+    assert seen.state["being typed"] == 3  # a hand with three letters still to go
+    where = DEFAULT.mmio_base + RECEIVER_DATA
+    s.step(3)
+    assert s.device("keyboard").state["key waiting"] is False  # not yet
+    s.step(1)  # the fourth instruction: the first letter
+    assert s.machine.memory.read(where, 4) == ord("a")
+    s.step(4)
+    assert s.machine.memory.read(where, 4) == ord("b")
+    assert s.device("keyboard").state["being typed"] == 1
+    assert s.device("keyboard").looks["lost"] == 0  # it was read in time, each one
+
+
+def test_a_program_that_asks_too_seldom_loses_the_letters_between(tmp_path):
+    """The whole lesson of the device: a hand goes on typing whether anybody is
+    asking or not, and what nobody asked for in time is gone - and counted."""
+    s = session(SUM, tmp_path, bus=DeviceBus([make("keyboard", typing=1)]))
+    s.typed("keyboard", "abcd")
+    s.step(4)  # four letters typed and not one of them read
+    assert s.device("keyboard").looks["lost"] == 3
+    assert s.device("keyboard").state["being typed"] == 0
+
+
+def test_a_hand_that_was_typing_is_not_still_typing_after_a_restart(tmp_path):
+    s = session(SUM, tmp_path, bus=DeviceBus([make("keyboard", typing=100)]))
+    s.typed("keyboard", "abc")
+    s.restart()
+    assert s.device("keyboard").state["being typed"] == 0
+
+
+def test_what_is_typed_waits_its_turn_behind_what_was_typed_before(tmp_path):
+    """A second line typed while the program is still reading the first does not
+    take its place: what is owed is kept by the session, because the device takes
+    one letter at a time and whoever types does not."""
+    s = session(SUM, tmp_path, bus=DeviceBus([make("keyboard")]))
+    s.fed("keyboard", "a")
+    s.fed("keyboard", "b")  # the second behind the first, not in its place
+    from pyrars.devices.keyboard import RECEIVER_DATA
+    from pyrars.isa.memory import DEFAULT
+
+    where = DEFAULT.mmio_base + RECEIVER_DATA
+    s.step(1)
+    assert s.machine.memory.read(where, 4) == ord("a")
+    s.step(1)
+    assert s.machine.memory.read(where, 4) == ord("b")
+
+
+def test_a_run_that_begins_again_owes_nothing_that_was_typed(tmp_path):
+    """A restart is a fresh run (the decision of 2026-10-21), and a program that
+    asks for a letter asks the person again."""
+    from pyrars.devices.keyboard import RECEIVER_DATA
+    from pyrars.isa.memory import DEFAULT
+
+    s = session(SUM, tmp_path, bus=DeviceBus([make("keyboard")]))
+    s.fed("keyboard", "abc")
+    s.restart()
+    s.step(2)
+    assert s.device("keyboard").state["key waiting"] is False
+    assert s.machine.memory.read(DEFAULT.mmio_base + RECEIVER_DATA, 4) == 0
+
+
+def test_an_image_put_on_a_disk_and_taken_off_it(tmp_path):
+    s = session(SUM, tmp_path,
+                bus=DeviceBus([make("disk", blocks=2, block_size=8)]))
+    held = bytes(range(16))
+    seen = s.put_on("disk", held)
+    assert seen.name == "disk"
+    kept = s.image_of("disk")
+    assert (kept.name, kept.data) == ("disk", held)
+
+
+def test_an_image_of_the_wrong_size_says_what_the_device_says(tmp_path):
+    """The size is the device's own, so the device is the one that says it."""
+    s = session(SUM, tmp_path,
+                bus=DeviceBus([make("disk", blocks=2, block_size=8)]))
+    with pytest.raises(ValueError, match="an image of 3 bytes for a disk of 16"):
+        s.put_on("disk", b"abc")
+
+
+def test_the_clock_of_a_device_started_and_stopped_by_hand(tmp_path):
+    """Which is what the timer of RARS lets one do, and what shows a program
+    reading a time that does not move."""
+    s = session(SUM, tmp_path, bus=DeviceBus([make("timer")]))
+    assert s.device("timer").state["running"] is True
+    assert s.ticking("timer", False).state["running"] is False
+    assert s.ticking("timer", True).state["running"] is True
+
+
+def test_what_a_device_will_not_be_asked_to_do(tmp_path):
+    """Every one of them says what it is in the same shape."""
+    s = session(SUM, tmp_path, bus=DeviceBus([make("timer"), make("lab")]))
+    with pytest.raises(ValueError, match="takes no text to type"):
+        s.fed("timer", "hi")
+    with pytest.raises(ValueError, match="holds no image"):
+        s.put_on("lab", b"")
+    with pytest.raises(ValueError, match="holds no image"):
+        s.image_of("timer")
+    with pytest.raises(ValueError, match="no clock to start or stop"):
+        s.ticking("lab", True)
+    with pytest.raises(ValueError, match="no keys to press"):
+        s.press("timer", 0)
+
+
+def test_pressing_a_key_is_no_step_of_the_machine(tmp_path):
+    """The journal knows nothing of it, exactly as `set` and `poke` are not steps
+    either (the rule of the journal)."""
+    s = session(SUM, tmp_path, bus=DeviceBus([make("lab")]))
+    s.step(3)
+    before = s.count()
+    s.press("lab", 1)
+    assert s.count() == before
+
+
+def test_a_device_with_no_keys_to_press(tmp_path):
+    s = session(SUM, tmp_path, bus=DeviceBus([make("timer")]))
+    with pytest.raises(ValueError, match="no keys to press"):
+        s.press("timer", 0)
+    with pytest.raises(ValueError, match="no device of that name is attached"):
+        s.press("lab", 0)
+
+
+def test_a_key_pressed_with_nothing_attached(sum_session):
+    with pytest.raises(ValueError, match="no device of that name is attached"):
+        sum_session.press("lab", 0)
+
+
 def test_the_blocks_a_cache_holds(tmp_path):
     s = session(SUM, tmp_path, caches=Caches(CacheSettings(block_bytes=16, sets=4)))
     s.carry_on()
@@ -615,6 +797,166 @@ def test_a_guesser_without_a_table_shows_none(tmp_path):
     s = session(SUM, tmp_path, pipeline=Pipeline(PipelineSettings()))
     s.carry_on()
     assert s.guesser_entries() == []
+
+
+def test_what_a_cache_was_built_with_and_what_it_counted(tmp_path):
+    """Both in one answer, because a hit rate means nothing without the cache that
+    gave it: the comparison anybody is making is the same program through a cache
+    of two ways and through one of eight."""
+    s = session(SUM, tmp_path, caches=Caches(CacheSettings(sets=4, ways=2)))
+    s.carry_on()
+    seen = s.caches()
+    assert [one.side for one in seen] == ["cache"]  # one cache for everything
+    built = {one.name: one.value for one in seen[0].settings}
+    assert (built["sets"], built["ways"]) == (4, 2)
+    assert "seed" in built  # everything it was built with, not only what is offered
+    assert seen[0].accesses == seen[0].hits + seen[0].misses > 0
+    assert seen[0].rate == seen[0].hits / seen[0].accesses
+    assert seen[0].fetches is False  # nobody asked for the instructions to reach it
+
+
+def test_a_cache_of_the_instructions_says_that_they_reach_it(tmp_path):
+    s = session(SUM, tmp_path, fetches=True,
+                caches=Caches(CacheSettings(), instructions=CacheSettings()))
+    s.carry_on()
+    seen = {one.side: one for one in s.caches()}
+    assert set(seen) == {"data", "instructions"}
+    assert seen["instructions"].fetches is True
+    assert seen["data"].fetches is False
+    # one fetch per instruction carried out; the ecall that ended the run is the
+    # one turn that never reached a model
+    assert seen["instructions"].accesses == WHOLE
+    assert seen["instructions"].hits > seen["instructions"].misses  # a loop
+
+
+def test_what_the_pipeline_counted(tmp_path):
+    s = session(SUM, tmp_path, pipeline=Pipeline(PipelineSettings()))
+    s.carry_on()
+    seen = s.pipeline()
+    assert seen.instructions == WHOLE
+    assert seen.cycles > seen.instructions  # five stages, and what was waited for
+    assert seen.cpi == seen.cycles / seen.instructions
+    assert seen.lost == sum(one.value for one in seen.stalls)  # what it waited for
+    assert {one.name for one in seen.settings} >= {"forwarding", "penalty"}
+    assert all(isinstance(one.value, int) for one in seen.stalls)
+    # four branches, and not every one of them was guessed wrongly: a machine
+    # that never expects a branch to be taken is right the once it is not
+    assert seen.branches == 4 and 0 < seen.wrong < seen.branches
+
+
+def test_the_cycles_of_the_model_are_walked_one_at_a_time(tmp_path):
+    """A cycle is no step of the machine: the model times a run that has already
+    happened, so walking it on means carrying the machine as far as it must go to
+    know what is in flight - and no further."""
+    s = session(SUM, tmp_path, pipeline=Pipeline(PipelineSettings()))
+    assert s.cycle_now == -1  # nobody has looked at a cycle yet
+    first = s.cycle_on()
+    assert first.now == 0
+    assert first.stepped == 1  # one instruction to know the first cycle
+    assert first.cycles == 5 and not first.ended
+    # the pipeline fills: a cycle, an instruction, and the diagonal grows
+    for expected in range(1, 5):
+        on = s.cycle_on()
+        assert on.now == expected
+        assert on.stepped == 1
+        assert s.count().instructions == expected + 1
+    assert s.pipeline().cycle == 4  # and the views are told which cycle it is
+
+
+def test_the_cycles_run_out_where_the_run_does(tmp_path):
+    """The diagram ends with the run, and the cycle sticks to the last of them
+    rather than walking off into cycles nobody will ever time."""
+    s = session(SUM, tmp_path, pipeline=Pipeline(PipelineSettings()))
+    s.carry_on()
+    last = s.cycle_on(10_000)
+    assert last.ended and last.now == last.cycles - 1
+    again = s.cycle_on()
+    assert again.now == last.now and again.stepped == 0
+
+
+def test_a_machine_that_cannot_go_on_stops_the_walk_of_the_cycles(tmp_path):
+    """A `wfi` with nothing to wait for is a machine that is not over and will not
+    move either (DEV-46). The walk must stop where the machine does rather than
+    asking it for another instruction for ever."""
+    s = session(".text\nmain: wfi\n", tmp_path,
+                pipeline=Pipeline(PipelineSettings()))
+    on = s.cycle_on(50)
+    assert not on.ended  # the run is not over: it is waiting for what cannot come
+    assert on.stepped <= 2  # it asked, was given nothing, and let it be
+    # and nothing was timed at all, so there is no cycle to look at
+    assert (on.now, on.cycles) == (-1, 0)
+    assert s.count().instructions == 0
+
+
+def test_a_restart_is_at_no_cycle_of_the_model_either(tmp_path):
+    s = session(SUM, tmp_path, pipeline=Pipeline(PipelineSettings()))
+    s.cycle_on(4)
+    assert s.cycle_now == 3  # four cycles on from no cycle at all is the fourth
+    s.restart()
+    assert s.cycle_now == -1
+    assert s.pipeline().cycle == -1
+
+
+def test_there_are_no_cycles_to_walk_without_a_pipeline(sum_session):
+    with pytest.raises(ValueError, match="no pipeline was asked for"):
+        sum_session.cycle_on()
+
+
+def test_the_diagram_the_pipeline_kept(tmp_path):
+    s = session(SUM, tmp_path, pipeline=Pipeline(PipelineSettings()))
+    s.carry_on()
+    drawn = s.diagram()
+    assert len(drawn) == WHOLE
+    assert drawn[0].address == TEXT and drawn[0].starts == (0, 1, 2, 3, 4)
+    assert len(drawn[0].starts) == 5  # the five stages
+    assert all(one.ex_cycles >= 1 for one in drawn)
+    # every instruction begins to be fetched after the one before it
+    assert all(later.starts[0] > earlier.starts[0]
+               for earlier, later in zip(drawn, drawn[1:]))
+
+
+def test_what_the_guesser_counted(tmp_path):
+    s = session(SUM, tmp_path,
+                pipeline=Pipeline(PipelineSettings(), Table(entries=4, bits=2)))
+    s.carry_on()
+    seen = s.guesser()
+    assert "4 entries" in seen.name and "2 bits" in seen.name
+    assert {one.name: one.value for one in seen.settings} == {"entries": 4,
+                                                             "bits": 2}
+    assert seen.guesses == seen.right + seen.wrong == 4  # the one branch, four times
+    assert seen.accuracy == seen.right / seen.guesses
+
+
+def test_a_guesser_that_keeps_no_table_says_what_it_is_all_the_same(tmp_path):
+    s = session(SUM, tmp_path, pipeline=Pipeline(PipelineSettings()))
+    s.carry_on()
+    assert s.guesser().settings == ()  # it has nothing to be built with
+    assert s.guesser().name
+
+
+def test_what_the_run_was_made_of(tmp_path):
+    s = session(SUM, tmp_path, statistics=True)
+    s.carry_on()
+    seen = s.statistics()
+    assert seen.instructions == WHOLE and seen.turns == WHOLE
+    assert (seen.traps, seen.unknown) == (0, 0)
+    assert (seen.taken, seen.not_taken) == (3, 1)
+    kinds = {one.name: one.value for one in seen.kinds}
+    assert kinds["branch"] == 4 and kinds["store"] == 1
+    assert sum(one.value for one in seen.kinds) == WHOLE
+    assert "jal" not in kinds  # by the KIND of instruction, not by its name
+    assert [one.name for one in seen.categories] == ["ALU", "Jump", "Branch",
+                                                     "Memory", "Other"]
+
+
+def test_a_run_nobody_asked_to_watch_says_so_and_does_not_fall_over(sum_session):
+    """A window shows what it is given; what it is NOT given it says nothing
+    about, and must not be made to guess."""
+    assert sum_session.caches() == []
+    assert sum_session.pipeline() is None
+    assert sum_session.diagram() == []
+    assert sum_session.guesser() is None
+    assert sum_session.statistics() is None
 
 
 def test_the_models_a_session_was_asked_for(tmp_path):
@@ -723,6 +1065,39 @@ def test_the_program_from_the_beginning(sum_session):
     assert [one.place.address for one in sum_session.breaks()] == [KEEP]
     assert sum_session.watches() == [watched]
     assert sum_session.frames() == []
+
+
+def test_a_restart_does_not_put_the_world_back(tmp_path):
+    """A restart is a FRESH run (user decision 2026-10-21): a program that asks for
+    a line asks again, rather than silently reading what it was given before.
+
+    A step back is unchanged - stepping back and forward again must give the same
+    thing twice - and that is tested with the journal, where it belongs.
+    """
+    asking = """\
+.globl main
+.data
+buffer: .space 32
+.text
+main:   li a7, 8
+        la a0, buffer
+        li a1, 32
+        ecall
+        li a7, 4
+        la a0, buffer
+        ecall
+        li a7, 93
+        li a0, 0
+        ecall
+"""
+    out, reader = io.StringIO(), io.StringIO("Ann\nBob\n")
+    s = session(asking, tmp_path,
+                io_=ConsoleIO(out=out, errors=io.StringIO(), reader=reader))
+    s.carry_on()
+    assert "Ann" in out.getvalue()
+    s.restart()
+    s.carry_on()
+    assert "Bob" in out.getvalue()  # the next line, because it asked again
 
 
 def test_a_restart_forgets_what_the_watches_counted(sum_session):

@@ -49,6 +49,26 @@ def get(machine: Machine, which: int) -> int:
     return machine.memory.read(MMIO + which, 1)
 
 
+# ------------------------------------------------------- what it looks like
+
+
+def test_what_the_lab_looks_like_is_its_bits_and_its_key():
+    """`state` is what to read about it in words; `looks` is the numbers a picture
+    of it is drawn from - which bits of which display, which key is down."""
+    from pyrars.devices.lab import KEYS, SEGMENTS
+
+    machine, device = lab()
+    put(machine, LEFT_DISPLAY, 0x5A)
+    device.press(6)
+    looks = device.looks()
+    assert looks["left"] == 0x5A and looks["right"] == 0
+    assert looks["key"] == 6
+    assert looks["segments"] == SEGMENTS and looks["keys"] == KEYS
+    assert looks["counting"] is False
+    device.release()
+    assert device.looks()["key"] == -1  # nothing is down, which is no key at all
+
+
 # ------------------------------------------------------------------ the displays
 
 

@@ -33,9 +33,10 @@ read the return address the way the convention says (D21).
 import signal
 import sys
 from contextlib import contextmanager
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass
 
 from pyrars.isa.registers import CSRS, F_NAMES, X_ALIASES, X_NAMES
+from pyrars.values import VALUE_FORMATS, ascii_text, value_text  # noqa: F401
 
 from pyrars.core.systemio import ConsoleIO
 from pyrars.session.debug import (
@@ -46,31 +47,6 @@ ASKING = "program> "
 BAR = " | "
 HERE = "->"
 WORD = 4
-
-VALUE_FORMATS = ("hex", "dec", "ascii")
-
-
-def value_text(value: int, bits: int, form: str) -> str:
-    """One value of `bits` bits, as the chosen format writes it. A register of a
-    64-bit machine therefore shows sixteen hexadecimal digits, where RARS prints
-    the low eight of any register (DEV-47); a word of memory is four bytes in both
-    widths."""
-    if form == "hex":
-        return f"0x{value:0{bits // 4}x}"
-    if form == "dec":
-        return str(value - (1 << bits) if value >> (bits - 1) else value)
-    return ascii_text(value, bits // 8)
-
-
-def ascii_text(value: int, width: int) -> str:
-    """The bytes of a value as characters, the highest first, each in three columns
-    and an unprintable one as a full stop - the way RARS writes them."""
-    letters = []
-    for index in reversed(range(width)):
-        byte = (value >> (8 * index)) & 0xFF
-        letters.append(f"{chr(byte) if 32 <= byte < 127 else '.':>3}")
-    return "".join(letters)
-
 
 class TerminalIO(ConsoleIO):
     """The world of a program being debugged: the terminal it shares with the
@@ -557,8 +533,8 @@ class Debugger:
                    or [[seen.name, "says nothing of itself"]])
 
     def _cache(self, words: list[str]) -> None:
-        caches = self.session.models.caches
-        if caches is None:
+        caches = self.session.caches()
+        if not caches:
             raise ValueError("no cache was asked for: run with --cache")
         if self._shown(words):
             rows = [[line.side, f"set {line.set}", f"place {line.place}",
@@ -568,44 +544,39 @@ class Debugger:
             self._rows(rows or [["the caches hold nothing yet"]])
             return
         rows = []
-        for side, cache in caches.each().items():
-            for name, value in asdict(cache.settings).items():
-                rows.append([side, name, str(value)])
-            for name, value in (("accesses", cache.accesses), ("hits", cache.hits),
-                                ("misses", cache.misses),
-                                ("rate", round(cache.hit_rate, 4)),
-                                ("writebacks", cache.writebacks),
-                                ("through", cache.through)):
-                rows.append([side, name, str(value)])
+        for cache in caches:
+            rows += [[cache.side, one.name, str(one.value)]
+                     for one in cache.settings]
+            rows += [[cache.side, name, str(value)] for name, value in
+                     (("accesses", cache.accesses), ("hits", cache.hits),
+                      ("misses", cache.misses), ("rate", round(cache.rate, 4)),
+                      ("writebacks", cache.writebacks), ("through", cache.through))]
         self._rows(rows)
 
     def _pipeline(self, words: list[str]) -> None:
-        pipeline = self.session.models.pipeline
+        pipeline = self.session.pipeline()
         if pipeline is None:
             raise ValueError("no pipeline was asked for: run with --pipeline")
         if self._shown(words):
-            rows = [[f"0x{row.pc:08x}", row.mnemonic,
+            rows = [[f"0x{row.address:08x}", row.mnemonic,
                      " ".join(str(cycle) for cycle in row.starts)]
-                    for row in pipeline.diagram]
+                    for row in self.session.diagram()]
             self._rows(rows or [["the pipeline kept no diagram"]])
             return
-        rows = [[name, _settled(value)]
-                for name, value in asdict(pipeline.settings).items()]
+        rows = [[one.name, _settled(one.value)] for one in pipeline.settings]
         rows += [["cycles", str(pipeline.cycles)],
                  ["instructions", str(pipeline.instructions)],
                  ["cpi", str(round(pipeline.cpi, 4))],
                  ["lost", str(pipeline.lost)]]
-        rows += [[f"lost.{cause}", str(many)]
-                 for cause, many in sorted(pipeline.stalls.items())]
+        rows += [[f"lost.{one.name}", str(one.value)] for one in pipeline.stalls]
         rows += [["branches", str(pipeline.branches)],
-                 ["wrong", str(pipeline.mispredictions)]]
+                 ["wrong", str(pipeline.wrong)]]
         self._rows(rows)
 
     def _guesser(self, words: list[str]) -> None:
-        pipeline = self.session.models.pipeline
-        if pipeline is None:
+        guesser = self.session.guesser()
+        if guesser is None:
             raise ValueError("no guesser was asked for: run with --pipeline")
-        guesser = pipeline.predictor
         if self._shown(words):
             rows = [[str(entry.entry), str(entry.counter),
                      "taken" if entry.taken else "not taken",
@@ -617,26 +588,23 @@ class Debugger:
             self._rows(rows)
             return
         rows = [["guesser", guesser.name]]
-        for name in ("entries", "bits"):
-            if hasattr(guesser, name):
-                rows.append([name, str(getattr(guesser, name))])
+        rows += [[one.name, str(one.value)] for one in guesser.settings]
         rows += [["guesses", str(guesser.guesses)], ["right", str(guesser.right)],
                  ["wrong", str(guesser.wrong)],
                  ["accuracy", str(round(guesser.accuracy, 4))]]
         self._rows(rows)
 
     def _stats(self, words: list[str]) -> None:
-        statistics = self.session.models.statistics
+        statistics = self.session.statistics()
         if statistics is None:
             raise ValueError("no statistics were asked for: run with --stats")
         rows = [["instructions", str(statistics.instructions)],
                 ["turns", str(statistics.turns)],
                 ["traps", str(statistics.traps)],
                 ["unknown", str(statistics.unknown)]]
-        rows += [[f"kind.{name}", str(many)]
-                 for name, many in statistics.kinds().items()]
-        rows += [[f"category.{name.lower()}", str(many)]
-                 for name, many in statistics.categories().items()]
+        rows += [[f"kind.{one.name}", str(one.value)] for one in statistics.kinds]
+        rows += [[f"category.{one.name.lower()}", str(one.value)]
+                 for one in statistics.categories]
         rows += [["branches.taken", str(statistics.taken)],
                  ["branches.not-taken", str(statistics.not_taken)]]
         self._rows(rows)

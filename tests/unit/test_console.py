@@ -545,8 +545,13 @@ def test_a_device_shows_itself(tmp_path):
                         flags=("--device", "keyboard"))
     assert spoken(out, "device list") == "keyboard | 0xffff0000 | 16 bytes"
     said = answer(out, "device keyboard")
-    assert said[0] == "shown        | -"  # nothing shown yet, and it says so
-    assert "mode         | scrolling" in said
+    # nothing shown yet, and it says so; the name is padded to the widest of them,
+    # which is "characters lost"
+    assert said[0] == "shown           | -"
+    assert "mode            | scrolling" in said
+    # and both the things it can lose, which is what the device is there to show
+    assert "keys lost       | 0" in said
+    assert "characters lost | 0" in said
     assert spoken(out, "device nothing") == (
         'error | "nothing": no device of that name is attached')
 
@@ -657,23 +662,27 @@ def test_the_prompt_of_the_program_keeps_the_debugger_off_its_line(tmp_path):
     assert any(line.startswith("exited 0 after") for line in lines(out))
 
 
-def test_a_restart_lets_the_program_read_the_same_input_again(tmp_path):
-    """A restart puts back the world the session owns, as a step back does under a
-    debugger: the program is given the same input a second time."""
+def test_a_restart_asks_the_person_again(tmp_path):
+    """A restart is a FRESH run (user decision 2026-10-21): the world outside is
+    not put back with it, so a program that asks for a line asks again.
+
+    It was the other way at first - a restart put back what had been read, by the
+    same reasoning as a step back - and watching it, a program that silently did
+    not ask was of no use to anybody. A step back is unchanged.
+    """
     _, out, _ = session(tmp_path, "continue", "restart", "continue", source=ASKS,
-                        given="Ann\n")
-    assert out.count("Ann") == 2  # once for each run of the program
-    # and the second time nobody was asked for it: it had been read before
-    assert out.count("program> ") == 1
+                        given="Ann\nBob\n")
+    assert out.count("program> ") == 2  # asked once for each run
+    assert "Ann" in out and "Bob" in out  # and given a different line each time
 
 
 def test_a_restart_puts_a_device_back_where_it_began(tmp_path):
     _, out, _ = session(tmp_path, "continue", "device keyboard", "restart",
                         source=SHOWS, flags=("--device", "keyboard"))
-    assert answer(out, "device keyboard")[0] == "shown        | A"
+    assert answer(out, "device keyboard")[0] == "shown           | A"
     _, out, _ = session(tmp_path, "continue", "restart", "device keyboard",
                         source=SHOWS, flags=("--device", "keyboard"))
-    assert answer(out, "device keyboard")[0] == "shown        | -"
+    assert answer(out, "device keyboard")[0] == "shown           | -"
 
 
 def test_the_format_of_the_command_line_is_the_format_of_the_session(tmp_path):
